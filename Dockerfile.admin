@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# workbuddy2api —— 「仅管理后台（admin 独立）」部署镜像
+#
+# 用途：把 admin 管理后台 + 托管网关（/v1/*）单独跑成一个容器，部署到
+#       Sealos / 任意容器平台。不需要 WorkBuddy 桌面端，全部状态都在 MySQL。
+#
+# 与仓库根目录 Dockerfile 的关系：
+#   根目录 Dockerfile 是 converter 独立版（8787，需要挂载桌面端 auth 目录）；
+#   本文件是 admin 版（8790，只需要一个 MySQL）。两者互不影响，可分别构建。
+#
+# 构建： docker build -f Dockerfile.admin -t <registry>/workbuddy2api-admin:v1 .
+# 运行： docker run -p 8790:8790 --env-file .env <registry>/workbuddy2api-admin:v1
+# ---------------------------------------------------------------------------
+FROM python:3.12-slim
+
+ENV TZ=Asia/Shanghai \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# 1) 依赖单独成层：以后只改代码不会触发重装依赖
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 2) 管理后台本体（含 admin/static/ 下的前端页面）
+COPY admin/ ./admin/
+
+# 3) ⚠️ 这一层不能省，否则容器启动即 ModuleNotFoundError。
+#    admin/backend.py 第 14 行：from converter import CredentialManager
+#    admin/server.py 第 27 行：from converter import app as converter_app
+#    ——「仅管理后台」在运行期依然复用了 converter 的鉴权/刷新/额度逻辑。
+#    converter.py 自身又硬依赖下面 4 个模块，所以必须一起 COPY。
+COPY converter.py ./converter.py
+COPY responses_adapter.py responses_projection.py anthropic_adapter.py desensitize.py ./
+
+# 说明：故意不安装 Node.js、不拷 turing_helper.js。
+#   Turing Shield SDK 是 win32/darwin 专有原生模块，Linux 容器里必然不可用。
+#   不装 node 可以让 admin/turing_token.py 在第一道判断就短路（只 WARNING 一次 + 60s 负缓存），
+#   避免每个请求都白等一次 fork 超时。
+#   代价：出站请求不带 X-Device-Token，敏感请求更容易被上游风控拦截。
+
+EXPOSE 8790
+
+# 健康检查：/admin 返回 200 即视为存活（slim 镜像没有 curl，用 python 自检）
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8790/admin', timeout=4).status == 200 else 1)"
+
+# ⚠️ 固定单 worker、单实例：
+#   admin/scheduler.py 的定时任务线程（每日签到 / 刷新积分 / 同步模型）没有任何跨进程锁，
+#   多 worker 或多副本会导致同一任务被并发执行 N 次（签到会真的打上游接口，有风控风险）。
+CMD ["python", "-m", "uvicorn", "admin.server:app", "--host", "0.0.0.0", "--port", "8790", "--log-level", "info"]
