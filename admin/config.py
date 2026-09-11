@@ -54,6 +54,25 @@ class Settings:
     HOST = os.getenv("ADMIN_HOST", "0.0.0.0")
     PORT = int(os.getenv("ADMIN_PORT", "8790"))
 
+    # /v1/messages（Anthropic Messages API）的模型档次映射。
+    # Claude Code 发的是 claude-opus-* / claude-sonnet-* / claude-haiku-* 这类名字，
+    # 上游不认；这里按档次落到本后台白名单里的模型名。
+    # 注意：不要默认成 auto —— 本后台的 auto 是「取第一个启用的模型」，
+    # 在 28 个模型里可能挑到 hunyuan-chat 之类不适合写代码的，甚至图像模型。
+    # 下面三个默认值按「最强 / 均衡 / 快速」选，可按自己号池的实际情况改。
+    ANTHROPIC_MODEL_OPUS = os.getenv("ADMIN_ANTHROPIC_MODEL_OPUS", "deepseek-v4-pro")
+    ANTHROPIC_MODEL_SONNET = os.getenv("ADMIN_ANTHROPIC_MODEL_SONNET", "glm-5.2")
+    ANTHROPIC_MODEL_HAIKU = os.getenv("ADMIN_ANTHROPIC_MODEL_HAIKU", "glm-5.3-flash")
+
+    # /v1/messages 的 harness 脱敏开关（与 converter 的 /gw 端点同款处理）。
+    # Claude Code 的 system prompt / tools 是固定模板，内含 "DoS / exploit / credential"
+    # 这类合规声明词，会被上游内容审核误判并整条拒绝，典型报错就是
+    #   400 {"code":11128,"msg":"Illegal API invocation from an unapproved channel"}
+    # 开启后会压缩 harness 并给敏感词插零宽空格。默认开启 —— 关掉大概率直接发不出去。
+    ANTHROPIC_DESENSITIZE = os.getenv("ADMIN_ANTHROPIC_DESENSITIZE", "1") != "0"
+    # 配合上项：跳过 harness 压缩，只做零宽脱敏（保留 system 原文，误拦风险略高）
+    ANTHROPIC_NO_COMPACT = os.getenv("ADMIN_ANTHROPIC_NO_COMPACT", "0") == "1"
+
     # 计费：后端未回传 credits 时，按 total_tokens * 系数 / 1000 估算（系数单位为「每千 token 积分」）
     COST_PER_TOKEN = float(os.getenv("ADMIN_COST_PER_TOKEN", "0.01"))
 

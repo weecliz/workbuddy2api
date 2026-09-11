@@ -327,6 +327,33 @@ class AnthropicStreamConverter:
 
     # ---- 内部 ----
 
+    def build_message(self) -> dict:
+        """把已消费完的流转成一个完整的 Anthropic Message 对象。
+
+        供非流式（stream=false）响应使用：调用方照常把上游 SSE 逐行喂给
+        feed_line()，最后再调本方法拿聚合结果。
+        """
+        usage = self._usage or {}
+        # Chat 的 finish_reason → Anthropic 的 stop_reason
+        stop_map = {"stop": "end_turn", "tool_calls": "tool_use", "length": "max_tokens"}
+        return {
+            "id": self.msg_id,
+            "type": "message",
+            "role": "assistant",
+            "model": self.model,
+            "content": self._build_content_blocks(),
+            "stop_reason": stop_map.get(self._finish_reason or "stop", "end_turn"),
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": usage.get("prompt_tokens", 0),
+                "output_tokens": usage.get("completion_tokens", 0),
+            },
+        }
+
+    def error_event(self, message: str, err_type: str = "api_error") -> str:
+        """构造 Anthropic 风格的 error 事件（上游全部不可用时返回给客户端）。"""
+        return self._evt("error", {"error": {"type": err_type, "message": message}})
+
     def _process_chunk(self, chunk: dict) -> str:
         events: list[str] = []
 
