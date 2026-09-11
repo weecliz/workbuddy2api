@@ -212,11 +212,30 @@ WORKBUDDY_VERSION              # 默认 2.0.0
 | 任务 | `GET/POST /api/schedules` · `PATCH/DELETE /api/schedules/{id}` · `POST /api/schedules/{id}/run` | 定时任务 CRUD / 立即运行 |
 | 用量 | `GET /api/usage` · `GET /api/logs/usage` | 用量汇总 / 明细 |
 | 代理网关 | `POST /v1/chat/completions` · `GET /v1/models` | 带 Key 校验 + 配额 + 记账 |
+| 代理网关 | `POST /v1/responses` | OpenAI Responses（适配 Codex CLI，默认做投影压缩） |
+| 代理网关 | `POST /v1/messages` · `POST /v1/messages/count_tokens` | Anthropic Messages（适配 Claude Code / CC Switch） |
 | 后台页 | `GET /admin` | 管理大屏静态页 |
+
+> 上面三条 `/v1/*` 网关路由**共用同一批 Key、同一套配额与用量记账**，账号都从号池自动挑选；
+> 只是入口协议不同（Chat / Responses / Anthropic）。注意 `base_url` 的约定不一样：
+> OpenAI 系客户端填 `http://<host>:8790/v1`，Anthropic 系（Claude Code）填 `http://<host>:8790`——
+> 两种 SDK 都会自己拼后面的路径。
 
 ### 3.4 环境变量（admin）
 
-`ADMIN_DATABASE_URL` · `ADMIN_REDIS_URL` · `ADMIN_BACKEND` · `ADMIN_USERNAME` · `ADMIN_PASSWORD` · `ADMIN_JWT_SECRET`（≥32 字节）· `ADMIN_JWT_EXPIRE_HOURS` · `ADMIN_COST_PER_TOKEN` · `ADMIN_ACCOUNT_SELECT`（`remain` / `lru`）· `ADMIN_PORT`
+`ADMIN_DATABASE_URL` · `ADMIN_REDIS_URL` · `ADMIN_BACKEND` · `ADMIN_USERNAME` · `ADMIN_PASSWORD` · `ADMIN_JWT_SECRET`（≥32 字节）· `ADMIN_JWT_EXPIRE_HOURS` · `ADMIN_COST_PER_TOKEN` · `ADMIN_ACCOUNT_SELECT`（`remain` / `lru`）· `ADMIN_PORT` · `ADMIN_CLIENT_AUTH_DIR`
+
+Anthropic 端点（`/v1/messages`）相关：
+
+- `ADMIN_ANTHROPIC_MODEL_OPUS` / `ADMIN_ANTHROPIC_MODEL_SONNET` / `ADMIN_ANTHROPIC_MODEL_HAIKU` —— Claude 的模型名按这三个档次映射到白名单模型，默认 `deepseek-v4-pro` / `glm-5.2` / `glm-5.3-flash`。**不要设成 `auto`**：本后台的 `auto` 语义是「取第一个启用的模型」，在 20+ 个模型里可能挑到不适合写代码的，甚至图像模型。
+- `ADMIN_ANTHROPIC_DESENSITIZE`（默认 `1`）—— harness 脱敏开关，见 §6 说明，**关掉基本发不出去**
+- `ADMIN_ANTHROPIC_NO_COMPACT`（默认 `0`）—— 只做零宽脱敏、跳过 harness 压缩
+
+内嵌 `/gw` 网关相关：
+
+- `CONVERTER_API_KEY` —— **必设**。`converter._check_auth()` 是 `if not key: return`，留空等于完全不鉴权，而服务默认监听 `0.0.0.0`
+- `CODEBUDDY_AUTH_DIR` —— converter 读取桌面端凭据的目录。**注意与 `ADMIN_CLIENT_AUTH_DIR` 是两个不同的变量**：后者给后台「扫描本机 / 注入本机」用。以 Windows 服务（LocalSystem）方式运行时两者都必须写**绝对路径**，否则 `%LOCALAPPDATA%` 会解析到空目录
+- `CONVERTER_DESENSITIZE` · `CONVERTER_LOG`
 
 ### 3.5 已知限制
 
@@ -399,6 +418,31 @@ codex --profile workbuddy "你的任务描述"
 ```
 
 ### Claude Code / CC Switch（走 `/v1/messages`）
+
+两条路，按「要不要多账号轮换 + Key 配额」来选：
+
+**A. 走共享平台（`8790`）—— 带 Key 校验、配额、用量记账，账号从号池自动挑选**
+
+```json
+{
+  "workbuddy-admin": {
+    "base_url": "http://127.0.0.1:8790",
+    "api_key": "后台 API Keys 页创建的那把 sk-...",
+    "model": "claude-sonnet-4-5-20250929"
+  }
+}
+```
+
+- **`base_url` 不要带 `/v1`**：Anthropic SDK 会自己拼 `/v1/messages`，填成 `.../v1` 会变成 `/v1/v1/messages`。（对比：OpenAI 系客户端要填 `.../v1`。）
+- 模型名可以照抄 Claude 官方的 `claude-sonnet-4-5-*` 这类名字 —— 服务端会按 opus / sonnet / haiku 三档自动映射到白名单里的模型；也可以直接填 `glm-5.2` 这类真实模型名。
+- **harness 脱敏默认开启**，无需额外参数。这一步不能省：Claude Code 的 system prompt 里有
+  "DoS attacks / exploit development / credential testing" 这类**拒绝作恶的合规声明**，
+  不做脱敏会被后端内容审核当成敏感内容整条拒绝，报错是极具误导性的
+  `400 {"code":11128,"msg":"Illegal API invocation from an unapproved channel"}`。
+  ⚠️ 排查提示：不脱敏时简单的 `"hello"` 请求**能通过**，只有真实 Claude Code 的完整 harness 才会被拦，
+  所以**不要用 hello 请求验证这个端点**。
+
+**B. 走本机直连（`8787`，`python converter.py`）—— 只用自己的桌面端登录态，无配额**
 
 ```json
 {
