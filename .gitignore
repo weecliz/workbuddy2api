@@ -36,6 +36,7 @@ logs/
 
 # ===== 本地部署 / SSH 快捷脚本（含服务器 IP 与密码，禁止提交） =====
 # 这些只是本机往线上推的快捷脚本，保留在本地即可，切勿上传。
+# service_admin.py 不在此列：它是服务宿主，属功能代码，需要随仓库分发。
 ssh_exec.py
 ssh_run.py
 ssh_sync.py
@@ -43,6 +44,8 @@ sync_auth.py
 sync_auth.bat
 start_admin.bat
 start_converter.bat
+install_service.bat
+uninstall_service.bat
 
 # ===== 测试文件（不提交到仓库；本地可保留用于回归测试） =====
 test_anthropic_adapter.py
