@@ -13,7 +13,9 @@
  *   1. 环境变量 WORKBUDDY_TURING_SDK_DIR（可指向 turing-sdk 目录，或指向桌面端安装基目录）
  *   2. %LOCALAPPDATA% / %APPDATA% / %ProgramFiles% / %ProgramFiles(x86)% / %USERPROFILE% 下的
  *      WorkBuddy 或 workbuddy 目录
- *   3. 各盘根目录（WORKBUDDY_TURING_DRIVES，默认 C,D,E,F）下的 workbuddy / WorkBuddy
+ *   3. 各盘根目录（WORKBUDDY_TURING_DRIVES，默认 C,D,E,F）下的 workbuddy / WorkBuddy，
+ *      以及 <盘符>:\Program Files\WorkBuddy、Program Files (x86)、Programs 下的同名目录
+ *      （处理「桌面端装在非系统盘的 Program Files 下」这种常见情况）
  *
  * 其余可覆盖的环境变量：
  *   WORKBUDDY_TURING_CHANNEL_ID  channelId（桌面端 product.json 中 turingSdk.channelId，默认 109144）
@@ -88,6 +90,12 @@ function collectCandidateDirs() {
     }
     bases.push(path.join(root, "workbuddy"));
     bases.push(path.join(root, "WorkBuddy"));
+    // 盘根下的 Program Files 系列目录：桌面端经常装在非系统盘的 Program Files 下
+    // （例如 D:\Program Files\WorkBuddy）。只扫 <盘符>:\WorkBuddy 会漏掉这类安装。
+    for (const pf of ["Program Files", "Program Files (x86)", "Programs"]) {
+      bases.push(path.join(root, pf, "WorkBuddy"));
+      bases.push(path.join(root, pf, "workbuddy"));
+    }
   }
 
   for (const base of bases) {

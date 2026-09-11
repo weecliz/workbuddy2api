@@ -63,6 +63,39 @@ def _pump(stream, log_path: Path, tag: str) -> None:
         pass
 
 
+def _display_host(host: str) -> str:
+    """把「监听地址」换算成「浏览器能直接打开的地址」。
+
+    0.0.0.0 / :: / * 是绑定用的通配地址，只表示「监听所有网卡」，
+    并不是一个可访问的主机名 —— 直接印进 URL 用户点不开，所以这里统一
+    换算成本机回环地址；其余地址原样返回。
+    """
+    h = (host or "").strip()
+    if h in ("", "0.0.0.0", "*", "::", "[::]", "0:0:0:0:0:0:0:0"):
+        return "127.0.0.1"
+    if ":" in h and not h.startswith("["):
+        return f"[{h}]"  # IPv6 字面量放进 URL 需要方括号
+    return h
+
+
+def _lan_ip() -> str | None:
+    """尽力探测本机在局域网中的 IPv4 地址；拿不到返回 None。
+
+    用 UDP connect 探测默认出口网卡 —— 只是设置对端地址、不会真的发包，
+    因此断网时也能拿到本机地址（只要有默认路由）。
+    """
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return None
+    finally:
+        s.close()
+
+
 # 运行后台所需的核心依赖；当前解释器缺任一即尝试切换到带依赖的虚拟环境。
 _REQUIRED_DEPS = ["pymysql", "uvicorn", "fastapi", "redis", "sqlalchemy"]
 
@@ -125,6 +158,16 @@ def main() -> None:
     ap.add_argument("--port", type=int, default=8790, help="服务端口（默认 8790）")
     args = ap.parse_args()
 
+    # 加载项目根目录的 .env，与 admin/config.py 保持一致。
+    # 不加载的话，下面基于 os.getenv 的安全告警看不到 .env 里配置的值，会误报
+    # 「未设置强 ADMIN_JWT_SECRET」；子进程（uvicorn）自己会加载 .env，
+    # 于是出现「实际用了强密钥、却仍告警」的矛盾现象。
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(ROOT / ".env")
+    except Exception:
+        pass  # 没装 python-dotenv 时静默跳过（不影响启动）
+
     # 部署安全检查
     secret = os.getenv("ADMIN_JWT_SECRET", "")
     if not secret or secret.startswith("workbuddy-admin-jwt-secret-please-change"):
@@ -136,7 +179,7 @@ def main() -> None:
     stop = threading.Event()
 
     def _launch(tag: str, cmd: list[str], port: int, host: str, logfile: Path) -> None:
-        _log(f"[main] 启动 {tag} (http://{host}:{port}) : {' '.join(cmd)}")
+        _log(f"[main] 启动 {tag} (监听 {host}:{port}) : {' '.join(cmd)}")
         p = subprocess.Popen(
             cmd, cwd=str(ROOT),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -163,11 +206,17 @@ def main() -> None:
         pass
 
     admin_port = os.getenv("ADMIN_PORT", str(args.port))
-    admin_host = os.getenv("ADMIN_HOST", args.host)
-    _log(f"[main] 单端口服务已启动：")
-    _log(f"       管理后台   : http://{admin_host}:{admin_port}/admin")
-    _log(f"       托管网关   : http://{admin_host}:{admin_port}/v1/chat/completions  (带 Key 配额)")
-    _log(f"       内嵌网关   : http://{admin_host}:{admin_port}/gw/v1/...            (桌面登录态 / responses / messages)")
+    bind_host = os.getenv("ADMIN_HOST", args.host)
+    # 回显统一用回环地址：0.0.0.0 只是绑定通配符，不能直接当 URL 打开
+    show_host = _display_host(bind_host)
+    _log(f"[main] 单端口服务已启动（监听 {bind_host}:{admin_port}）：")
+    _log(f"       管理后台   : http://{show_host}:{admin_port}/admin")
+    _log(f"       托管网关   : http://{show_host}:{admin_port}/v1/chat/completions  (带 Key 配额)")
+    _log(f"       内嵌网关   : http://{show_host}:{admin_port}/gw/v1/...            (桌面登录态 / responses / messages)")
+    if bind_host in ("0.0.0.0", "*", "::"):
+        lan = _lan_ip()
+        if lan:
+            _log(f"       局域网访问 : http://{lan}:{admin_port}/admin")
     _log("[main] 按 Ctrl+C 停止。")
 
     # 主循环：子进程异常退出则整体退出，避免孤儿进程
