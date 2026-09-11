@@ -1,4 +1,5 @@
 """管理后台 FastAPI 入口：登录、挂载路由、托管前端静态页、启动时建库建表。"""
+import logging
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
@@ -170,4 +171,37 @@ if _CONVERTER_EMBEDDED:
     _conv_cfg["log_path"] = os.getenv(
         "CONVERTER_LOG", str(STATIC_DIR.parent.parent / "logs" / "converter-embedded.log")
     )
+
+    # 补上登录凭据。CONFIG["cred"] 只在 converter.py 的 main() 里赋值，而这里是
+    # import 进来挂载的（main() 永不执行），所以它默认恒为 None —— 结果是 /gw 下
+    # 所有需要凭据的端点一律 503（含 Claude Code 用的 /gw/v1/messages）。
+    # 这里按独立运行时的同样逻辑补一次初始化。
+    # 注意：服务若以非桌面登录账户运行，需用 CODEBUDDY_AUTH_DIR 指向该账户的 auth 目录。
+    if _conv_cfg.get("cred") is None:
+        try:
+            from converter import CredentialManager, find_auth_file
+
+            _auth_file = find_auth_file()
+            if _auth_file:
+                _conv_cfg["cred"] = CredentialManager(_auth_file)
+        except Exception:
+            pass
+
+    # /gw 的鉴权开关。converter._check_auth() 的实现是 `if not key: return` ——
+    # key 为空就等于完全不鉴权，而本服务默认监听 0.0.0.0，那等于把桌面端账号的
+    # 额度向整个网络开放。所以只认环境变量，不做任何默认值兜底。
+    _conv_cfg["api_key"] = os.getenv("CONVERTER_API_KEY", "")
+
+    _log = logging.getLogger("admin.server")
+    if _conv_cfg.get("cred") is None:
+        _log.warning(
+            "/gw 未取得桌面端登录凭据，/gw/v1/* 将返回 503。"
+            "请确认桌面端已登录，或用 CODEBUDDY_AUTH_DIR 指定 auth 目录。"
+        )
+    elif not _conv_cfg["api_key"]:
+        _log.warning(
+            "/gw 可用但 CONVERTER_API_KEY 为空：/gw/v1/* 不校验任何 Key，"
+            "任何能访问本端口的人都能消耗账号额度。建议在 .env 中设置。"
+        )
+
     app.mount("/gw", converter_app)

@@ -4,8 +4,12 @@
 
 本项目对外只暴露「一个端口」即可：
   - 管理后台前端（index.html）与后端 API：http://127.0.0.1:8790/admin
-  - 对外共享的托管网关（带 Key 校验 / 配额 / 用量记账）：http://127.0.0.1:8790/v1/chat/completions、/v1/models
-  - 内嵌的独立网关 converter（本机桌面登录态直连，额外支持 /v1/responses、/v1/messages、/v1/balance）：
+  - 对外共享的托管网关（带 Key 校验 / 配额 / 用量记账 / 号池调度）：
+        http://127.0.0.1:8790/v1/chat/completions   （OpenAI 协议）
+        http://127.0.0.1:8790/v1/responses          （Responses 协议）
+        http://127.0.0.1:8790/v1/messages           （Anthropic 协议，Claude Code 用）
+        http://127.0.0.1:8790/v1/models
+  - 内嵌的独立网关 converter（本机桌面登录态直连，无 Key 配额；额外支持 /v1/balance）：
         http://127.0.0.1:8790/gw/v1/...
 
 converter 已在 admin/server.py 中挂载到 /gw 前缀，因此无需再单独开 8787 端口/进程。
@@ -210,9 +214,15 @@ def main() -> None:
     # 回显统一用回环地址：0.0.0.0 只是绑定通配符，不能直接当 URL 打开
     show_host = _display_host(bind_host)
     _log(f"[main] 单端口服务已启动（监听 {bind_host}:{admin_port}）：")
-    _log(f"       管理后台   : http://{show_host}:{admin_port}/admin")
-    _log(f"       托管网关   : http://{show_host}:{admin_port}/v1/chat/completions  (带 Key 配额)")
-    _log(f"       内嵌网关   : http://{show_host}:{admin_port}/gw/v1/...            (桌面登录态 / responses / messages)")
+    _log(f"       管理后台    : http://{show_host}:{admin_port}/admin")
+    _log(f"       OpenAI 端点 : http://{show_host}:{admin_port}/v1/chat/completions  (带 Key 配额)")
+    _log(f"       Responses   : http://{show_host}:{admin_port}/v1/responses         (带 Key 配额)")
+    _log(f"       Claude 端点 : http://{show_host}:{admin_port}/v1/messages          (带 Key 配额，Anthropic 协议)")
+    _log(f"       内嵌 /gw    : http://{show_host}:{admin_port}/gw/v1/...            (桌面登录态，无配额)")
+    _log(f"       客户端 base_url :")
+    _log(f"           OpenAI SDK  -> http://{show_host}:{admin_port}/v1")
+    _log(f"           Claude Code -> http://{show_host}:{admin_port}   (注意：不能再带 /v1)")
+    _log(f"       API Key 在后台「API Keys」页创建；Claude 端的模型名会自动按档次映射")
     if bind_host in ("0.0.0.0", "*", "::"):
         lan = _lan_ip()
         if lan:

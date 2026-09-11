@@ -34,9 +34,18 @@ echo.
 echo ============================================================
 echo   workbuddy2api   admin + gateway
 echo ------------------------------------------------------------
-echo   dashboard : http://127.0.0.1:%SHOW_PORT%/admin
-echo   gateway   : http://127.0.0.1:%SHOW_PORT%/v1/chat/completions
-echo   converter : http://127.0.0.1:%SHOW_PORT%/gw/v1/...
+echo   dashboard  : http://127.0.0.1:%SHOW_PORT%/admin
+echo   OpenAI API : http://127.0.0.1:%SHOW_PORT%/v1/chat/completions
+echo   Responses  : http://127.0.0.1:%SHOW_PORT%/v1/responses
+echo   Claude API : http://127.0.0.1:%SHOW_PORT%/v1/messages
+echo   converter  : http://127.0.0.1:%SHOW_PORT%/gw/v1/...
+echo ------------------------------------------------------------
+echo   client base_url:
+echo     OpenAI SDK   base_url = http://127.0.0.1:%SHOW_PORT%/v1
+echo     Claude Code  base_url = http://127.0.0.1:%SHOW_PORT%
+echo   All /v1/* endpoints share the same API Keys and quota;
+echo   API Key is created in the dashboard, API Keys page.
+echo   /v1/messages maps claude-* model names automatically.
 echo ============================================================
 echo.
 

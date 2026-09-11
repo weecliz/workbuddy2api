@@ -144,21 +144,36 @@
         </div>
         <div class="grid gap-2 text-sm">
           <div class="flex items-center gap-2 flex-wrap">
-            <span class="text-slate-400 w-16 shrink-0">Base URL</span>
+            <span class="text-slate-400 w-32 shrink-0">Base URL <span class="text-[10px] text-slate-300">OpenAI</span></span>
             <code id="shareBaseUrl" class="flex-1 min-w-0 truncate rounded bg-slate-50 px-2 py-1 font-mono text-xs"></code>
             <button onclick="copyText('#shareBaseUrl')" class="px-2 py-1 rounded border text-xs shrink-0" title="复制"><i class="fa-solid fa-copy"></i></button>
           </div>
           <div class="flex items-center gap-2 flex-wrap">
-            <span class="text-slate-400 w-16 shrink-0">鉴权</span>
-            <code class="flex-1 min-w-0 truncate rounded bg-slate-50 px-2 py-1 font-mono text-xs">Authorization: Bearer &lt;你的 Key&gt;</code>
+            <span class="text-slate-400 w-32 shrink-0">Base URL <span class="text-[10px] text-slate-300">Claude</span></span>
+            <code id="shareBaseUrlClaude" class="flex-1 min-w-0 truncate rounded bg-slate-50 px-2 py-1 font-mono text-xs"></code>
+            <button onclick="copyText('#shareBaseUrlClaude')" class="px-2 py-1 rounded border text-xs shrink-0" title="复制"><i class="fa-solid fa-copy"></i></button>
+          </div>
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-slate-400 w-32 shrink-0">鉴权</span>
+            <code class="flex-1 min-w-0 truncate rounded bg-slate-50 px-2 py-1 font-mono text-xs">Authorization: Bearer &lt;你的 Key&gt; &nbsp;或&nbsp; x-api-key: &lt;你的 Key&gt;</code>
+          </div>
+          <div class="text-[11px] text-slate-400 leading-relaxed rounded bg-slate-50 px-2 py-1.5">
+            OpenAI 与 Anthropic 两套协议<b>共用同一批 Key、同一套配额与用量记账</b>，只是 base_url 约定不同：
+            OpenAI SDK 填上面那个（含 <code class="font-mono">/v1</code>），
+            Claude Code / Anthropic SDK 填下面那个（<b>不含</b> <code class="font-mono">/v1</code>，SDK 会自己拼 <code class="font-mono">/v1/messages</code>，填错会变成 <code class="font-mono">/v1/v1/messages</code>）。
+            Claude 端的 <code class="font-mono">claude-sonnet-4-5</code> 这类模型名由服务端自动按档次映射到下方白名单里的模型，无需手动改。
           </div>
           <div>
             <div class="text-slate-400 text-xs mb-1">可用模型（启用白名单，共 <span id="shareModelCount">0</span> 个）</div>
             <div id="shareModels" class="flex flex-wrap gap-1.5"></div>
           </div>
           <details class="text-xs text-slate-500">
-            <summary class="cursor-pointer text-wb select-none">接入示例（curl）</summary>
+            <summary class="cursor-pointer text-wb select-none">接入示例 · OpenAI 协议（curl）</summary>
             <pre id="shareCurl" class="mt-2 bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto text-[11px] whitespace-pre"></pre>
+          </details>
+          <details class="text-xs text-slate-500">
+            <summary class="cursor-pointer text-wb select-none">接入示例 · Claude Code / Anthropic 协议（curl）</summary>
+            <pre id="shareCurlClaude" class="mt-2 bg-slate-900 text-slate-100 rounded-lg p-3 overflow-x-auto text-[11px] whitespace-pre"></pre>
           </details>
         </div>
       </div>
@@ -813,14 +828,29 @@ async function loadKeys(){
 }
 /* 对外对接信息：暴露 baseurl + 启用模型列表，供把 Key 共享给外部使用 */
 async function loadShareInfo() {
-  const base = location.origin + "/v1";
+  // 两个 SDK 对 base_url 的约定不同，必须分别给出：
+  //   OpenAI 系    -> origin + "/v1"（SDK 自己拼 /chat/completions）
+  //   Anthropic 系 -> origin        （SDK 自己拼 /v1/messages，再带 /v1 会变成 /v1/v1/messages）
+  // 两者共用同一批 Key 与配额。
+  const origin = location.origin;
+  const base = origin + "/v1";
   if ($("#shareBaseUrl")) $("#shareBaseUrl").textContent = base;
+  if ($("#shareBaseUrlClaude")) $("#shareBaseUrlClaude").textContent = origin;
   if ($("#shareCurl")) {
     $("#shareCurl").textContent =
       "curl " + base + "/chat/completions \\\n" +
       '  -H "Authorization: Bearer <你的 Key>" \\\n' +
       '  -H "Content-Type: application/json" \\\n' +
       "  -d '{\"model\":\"auto\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}'";
+  }
+  if ($("#shareCurlClaude")) {
+    $("#shareCurlClaude").textContent =
+      "curl " + origin + "/v1/messages \\\n" +
+      '  -H "x-api-key: <你的 Key>" \\\n' +
+      '  -H "anthropic-version: 2023-06-01" \\\n' +
+      '  -H "Content-Type: application/json" \\\n' +
+      "  -d '{\"model\":\"claude-sonnet-4-5-20250929\",\"max_tokens\":1024," +
+      "\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}'";
   }
   try {
     const r = await api("/api/models/configs");
@@ -1246,7 +1276,7 @@ async function loadLogs(page){
       <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">${fmtTime(l.created_at)}</td>
       <td class="px-3 py-2 text-xs font-mono text-slate-600" title="${esc(l.key_name)}">${esc((l.key_name||'').slice(0,10))}</td>
       <td class="px-3 py-2 text-xs text-slate-600" title="${esc(l.account_name)}">${esc((l.account_name||'').slice(0,12))}</td>
-      <td class="px-3 py-2 font-mono text-[11px] text-slate-600" title="${esc(l.model)}">${esc((l.model||'').slice(0,16))}</td>
+      <td class="px-3 py-2 font-mono text-[11px] text-slate-600 whitespace-nowrap" title="${esc(l.model)}">${esc((l.model||'').slice(0,24))}</td>
       <td class="px-3 py-2">${tokenHtml}</td>
       <td class="px-3 py-2 text-xs">${credHtml}</td>
       <td class="px-3 py-2">${latencyHtml}</td>
