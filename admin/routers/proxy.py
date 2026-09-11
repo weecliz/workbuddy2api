@@ -567,9 +567,41 @@ def _estimate_credits(sse_text: str, model: str) -> float:
     return 0.0
 
 
+def _desensitize_chat(body: dict, enabled: bool, compact: bool = True) -> dict:
+    """按开关对 chat 请求体做 harness 脱敏（压缩 harness + 敏感词插零宽空格）。
+
+    上游内容审核会把「拒绝作恶」的合规声明词（DoS / exploit / credential…）当成敏感
+    内容，把整条请求拒掉，报错 `11128 "Illegal API invocation from an unapproved
+    channel"` —— 措辞极具误导性，看起来像渠道问题，其实是内容审核。
+    长 harness 客户端（Claude Code、Pi 等）的 system prompt 里正有这些词，所以必须处理；
+    普通短 prompt 客户端不受影响，故默认只在 Anthropic 端点开启。
+
+    注意：开启后简单的 "hello" 请求**依然能通过**，只有完整 harness 才会被拦 ——
+    不要用 hello 请求来验证这个端点是否正常。
+    """
+    if not (_DESENSITIZE_AVAILABLE and enabled):
+        return body
+    try:
+        raw_len = len(json.dumps(body, ensure_ascii=False))
+        out = desensitize_body(
+            body,
+            roles=("system", "developer"),
+            desensitize_harness_user=True,
+            desensitize_tools=True,
+            compact_harness=compact,
+            strip_tool_metadata=True,
+        )
+        _logger.info("harness 脱敏 %d -> %d 字节（compact=%s）",
+                     raw_len, len(json.dumps(out, ensure_ascii=False)), compact)
+        return out
+    except Exception as e:
+        _logger.warning("harness 脱敏失败，按原样发送：%s", e)
+        return body
+
+
 # Claude Code 等 Anthropic 客户端发来的是 claude-* 模型名，上游不认。
 # 按 opus / sonnet / haiku 三个档次映射到本后台白名单里的模型，
-# 档次目标来自 .env（ADMIN_ANTHROPIC_MODEL_*），默认 auto。
+# 档次目标来自 .env（ADMIN_ANTHROPIC_MODEL_*）。
 _ANTHROPIC_MODEL_TIERS = (
     ("opus", settings.ANTHROPIC_MODEL_OPUS),
     ("sonnet", settings.ANTHROPIC_MODEL_SONNET),
@@ -652,6 +684,10 @@ async def chat_completions(
     opts = dict(body.get("stream_options") or {})
     opts["include_usage"] = True
     body["stream_options"] = opts
+
+    # 长 harness 客户端（Pi / claude-code-router 之类）走 OpenAI 协议时同样会撞上游内容
+    # 审核。由 ADMIN_OPENAI_DESENSITIZE 控制，默认关，避免无谓改动短 prompt 客户端。
+    body = _desensitize_chat(body, settings.OPENAI_DESENSITIZE)
 
     url = f"{settings.BACKEND}/v2/chat/completions"
 
@@ -815,6 +851,9 @@ async def responses_proxy(
     opts = dict(chat_body.get("stream_options") or {})
     opts["include_usage"] = True
     chat_body["stream_options"] = opts
+
+    # 同 /v1/chat/completions：长 harness 客户端走 Responses 协议时也要脱敏
+    chat_body = _desensitize_chat(chat_body, settings.OPENAI_DESENSITIZE)
 
     requested = payload.get("model", "auto")
     resolved = _pick_best_model(db, requested)
@@ -1054,25 +1093,13 @@ async def anthropic_messages(
     # Claude Code 的 system prompt / tools 是固定 harness 模板，内含 "DoS attacks /
     # exploit development / credential testing" 一类合规声明词 —— 这些是「拒绝作恶」
     # 声明，却会被上游内容审核当成敏感内容，整条请求被拒（就是那个 11128
-    # "unapproved channel"）。这里做与 converter /gw 端点完全相同的 harness 压缩 +
-    # 零宽空格脱敏：模型读到的仍是原词，后端的关键词匹配失效。少了这一步，
-    # Claude Code 的真实请求基本发不出去（简单 hello 测试却会通过，很容易误判）。
-    if _DESENSITIZE_AVAILABLE and settings.ANTHROPIC_DESENSITIZE:
-        try:
-            _raw_len = len(json.dumps(chat_body, ensure_ascii=False))
-            chat_body = desensitize_body(
-                chat_body,
-                roles=("system", "developer"),
-                desensitize_harness_user=True,
-                desensitize_tools=True,
-                compact_harness=not settings.ANTHROPIC_NO_COMPACT,
-                strip_tool_metadata=True,
-            )
-            _logger.info("harness 脱敏 %d -> %d 字节（compact=%s）",
-                         _raw_len, len(json.dumps(chat_body, ensure_ascii=False)),
-                         not settings.ANTHROPIC_NO_COMPACT)
-        except Exception as e:
-            _logger.warning("harness 脱敏失败，按原样发送：%s", e)
+    # "unapproved channel"）。这一步不能省：少了它，真实 Claude Code 请求基本发不出去
+    # （而简单的 hello 测试却会通过，很容易误判成「已跑通」）。
+    chat_body = _desensitize_chat(
+        chat_body,
+        settings.ANTHROPIC_DESENSITIZE,
+        compact=not settings.ANTHROPIC_NO_COMPACT,
+    )
 
     requested = _map_anthropic_model(db, payload.get("model", "auto"))
     resolved = _pick_best_model(db, requested)

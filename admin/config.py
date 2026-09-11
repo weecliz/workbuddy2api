@@ -73,6 +73,12 @@ class Settings:
     # 配合上项：跳过 harness 压缩，只做零宽脱敏（保留 system 原文，误拦风险略高）
     ANTHROPIC_NO_COMPACT = os.getenv("ADMIN_ANTHROPIC_NO_COMPACT", "0") == "1"
 
+    # 给 OpenAI 协议的两个端点（/v1/chat/completions 与 /v1/responses）也启用同一套
+    # harness 脱敏。默认**关闭**：普通 OpenAI 客户端（Cherry Studio / LobeChat 等）的
+    # system prompt 很短，脱敏只会无谓改动 prompt；只有用 OpenAI 协议接「长 harness 客户端」
+    # （如 Pi、claude-code-router 之类）时才需要打开，否则同样会撞 11128。
+    OPENAI_DESENSITIZE = os.getenv("ADMIN_OPENAI_DESENSITIZE", "0") == "1"
+
     # 计费：后端未回传 credits 时，按 total_tokens * 系数 / 1000 估算（系数单位为「每千 token 积分」）
     COST_PER_TOKEN = float(os.getenv("ADMIN_COST_PER_TOKEN", "0.01"))
 

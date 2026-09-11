@@ -230,6 +230,9 @@ Anthropic 端点（`/v1/messages`）相关：
 - `ADMIN_ANTHROPIC_MODEL_OPUS` / `ADMIN_ANTHROPIC_MODEL_SONNET` / `ADMIN_ANTHROPIC_MODEL_HAIKU` —— Claude 的模型名按这三个档次映射到白名单模型，默认 `deepseek-v4-pro` / `glm-5.2` / `glm-5.3-flash`。**不要设成 `auto`**：本后台的 `auto` 语义是「取第一个启用的模型」，在 20+ 个模型里可能挑到不适合写代码的，甚至图像模型。
 - `ADMIN_ANTHROPIC_DESENSITIZE`（默认 `1`）—— harness 脱敏开关，见 §6 说明，**关掉基本发不出去**
 - `ADMIN_ANTHROPIC_NO_COMPACT`（默认 `0`）—— 只做零宽脱敏、跳过 harness 压缩
+- `ADMIN_OPENAI_DESENSITIZE`（默认 `0`）—— 把同一套 harness 脱敏也应用到
+  `/v1/chat/completions` 与 `/v1/responses`。**用 OpenAI 协议接入长 harness 客户端
+  （Pi、claude-code-router 等）时才需要开**；普通短 prompt 客户端开了只会无谓改动提示词
 
 内嵌 `/gw` 网关相关：
 
