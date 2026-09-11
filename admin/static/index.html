@@ -203,7 +203,9 @@
         <table class="w-full text-sm min-w">
           <thead class="bg-slate-50 text-slate-500 text-left sticky top-0">
             <tr>
-              <th class="px-4 py-3">模型 ID</th><th class="px-4 py-3">级别</th><th class="px-4 py-3">倍率</th>
+              <th class="px-4 py-3">模型 ID</th><th class="px-4 py-3">级别</th>
+              <th class="px-4 py-3"><button type="button" onclick="toggleModelSort()" id="thModelMult"
+                class="inline-flex items-center gap-1 hover:text-slate-700 font-medium" title="点击切换倍率排序（升序 → 降序 → 默认）">倍率 <i class="fa-solid fa-sort text-slate-300"></i></button></th>
               <th class="px-4 py-3">备注</th><th class="px-4 py-3">状态</th><th class="px-4 py-3 text-right">操作</th>
             </tr>
           </thead>
@@ -403,6 +405,8 @@ const PS = 10;
 let _accData = [], _keyData = [], _modelData = [];
 let _accTerm = "", _keyTerm = "", _modelTerm = "";
 let _modelPage = 1;  // 模型配置当前页：跨操作与浏览器刷新保持
+// 模型列表排序：'default'(按 id) | 'mult_asc' | 'mult_desc'
+let _modelSort = "default";
 function pagerHtml(total, page, totalPages, fn) {
   if (totalPages <= 1) return `<span class="text-slate-400">共 ${total} 条</span>`;
   return `<span>共 ${total} 条 · 第 ${page}/${totalPages} 页</span>
@@ -932,17 +936,53 @@ function modelRow(m) {
       </td>
     </tr>`;
 }
+// 倍率排序：升序 → 降序 → 默认，循环切换
+function toggleModelSort(){
+  _modelSort = _modelSort === "mult_asc" ? "mult_desc"
+             : _modelSort === "mult_desc" ? "default" : "mult_asc";
+  try { localStorage.setItem("wb_model_sort", _modelSort); } catch(e) {}
+  updateModelSortIcon();
+  renderModelPage(1);  // 排序后回到第一页，避免停在中段看不到结果
+}
+// 表头箭头指示当前排序方向
+function updateModelSortIcon(){
+  const btn = document.getElementById("thModelMult");
+  if(!btn) return;
+  const icon = btn.querySelector("i");
+  icon.className = _modelSort === "mult_asc" ? "fa-solid fa-sort-up text-indigo-500"
+                 : _modelSort === "mult_desc" ? "fa-solid fa-sort-down text-indigo-500"
+                 : "fa-solid fa-sort text-slate-300";
+  btn.classList.toggle("text-indigo-600", _modelSort !== "default");
+}
+function sortModelData(list){
+  if(_modelSort === "default") return list;
+  // 倍率缺失(null/undefined)按 0 处理，避免比较结果不稳定
+  const val = m => (m.credit_multiplier == null ? 0 : Number(m.credit_multiplier));
+  const dir = _modelSort === "mult_asc" ? 1 : -1;
+  // 复制后排序，不改动原数组（原数组还要供其它操作复用）
+  return list.slice().sort((a,b) => {
+    const d = (val(a) - val(b)) * dir;
+    if(d !== 0) return d;
+    return (a.model_id || "").localeCompare(b.model_id || "");  // 同倍率按 ID 稳定排序
+  });
+}
 async function loadModels(){
   const r = await api("/api/models/configs"); if(!r.ok) return;
   const d = await r.json();
   _modelData = d.items || [];
-  // 恢复上次停留的页码（浏览器刷新 / 操作后保持）
+  // 恢复上次停留的页码与排序（浏览器刷新 / 操作后保持）
   try { _modelPage = parseInt(localStorage.getItem("wb_model_page") || "1") || 1; } catch(e) {}
+  try {
+    const s = localStorage.getItem("wb_model_sort");
+    if(s === "mult_asc" || s === "mult_desc" || s === "default") _modelSort = s;
+  } catch(e) {}
+  updateModelSortIcon();
   renderModelPage(_modelPage);
 }
 function renderModelPage(p) {
   const term = (_modelTerm = ($("#modelSearch") ? $("#modelSearch").value : "").trim().toLowerCase());
-  const data = term ? _modelData.filter(m => (m.model_id||"").toLowerCase().includes(term) || (m.note||"").toLowerCase().includes(term)) : _modelData;
+  const filtered = term ? _modelData.filter(m => (m.model_id||"").toLowerCase().includes(term) || (m.note||"").toLowerCase().includes(term)) : _modelData;
+  const data = sortModelData(filtered);
   const total = data.length, totalPages = Math.max(1, Math.ceil(total / PS));
   p = Math.min(Math.max(1, p), totalPages);
   _modelPage = p;  // 记住当前页，供后续操作 / 刷新恢复
