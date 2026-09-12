@@ -457,16 +457,16 @@ python -m uvicorn admin.server:app --host 0.0.0.0 --port 8790
 
 ### 4.5 Docker
 
-容器拿不到桌面端 auth 文件，需把宿主机登录态目录挂进去。改 `docker-compose.yml` 里的 auth 挂载路径后：
+容器拿不到桌面端 auth 文件，需把宿主机登录态目录挂进去。改 `deploy/docker-compose.yml` 里的 auth 挂载路径后，在 `deploy/` 目录执行：
 
 ```bash
 docker compose up -d --build
 ```
 
-或单容器：
+或单容器（context 是仓库根目录）：
 
 ```bash
-docker build -t workbuddy2api .
+docker build -f deploy/Dockerfile -t workbuddy2api .
 docker run -d --name workbuddy2api -p 8787:8787 \
   -v ~/Library/Application\ Support/CodeBuddyExtension/Data/Public/auth:/data/auth:ro \
   -e CODEBUDDY_AUTH_DIR=/data/auth \
@@ -637,31 +637,41 @@ python converter.py --desensitize --log converter.log
 
 ```text
 workbuddy2api/
-├── converter.py              # 内嵌网关主入口（FastAPI），挂载到 /gw/v1（main.py 下）
 ├── main.py                   # 一键单端口启动：管理后台 + 托管网关 + 内嵌网关
-├── responses_adapter.py      # OpenAI Responses ↔ Chat 适配
-├── responses_projection.py   # Codex / agent 请求投影压缩
-├── anthropic_adapter.py      # Anthropic Messages ↔ Chat 适配
-├── desensitize.py            # 运行时文本压缩与零宽脱敏
+├── service_admin.py          # Windows 服务宿主（与 main.py 跑同一个 admin.server:app）
 ├── turing_helper.js          # Node：调用桌面端 Turing Shield SDK 取设备风控 token
-├── sync_auth.py / .bat       # 同步本机登录态到服务器
-├── start_converter.bat       # 本机直连网关一键启动
-├── start_admin.bat           # 管理后台一键启动（强密码 + 固定 JWT secret）
-├── requirements.txt / Dockerfile / docker-compose.yml
-├── scripts/
-│   └── test_daily_checkin.py # 签到验证脚本（仅对未领账号真实领取）
+├── requirements.txt          # Python 依赖
+├── core/                     # 内核：上游协议适配与凭据管理
+│   ├── converter.py          # CredentialManager + /gw 单账号旁路 FastAPI app
+│   ├── responses_adapter.py  # OpenAI Responses ↔ Chat 适配
+│   ├── responses_projection.py # Codex / agent 请求投影压缩
+│   ├── anthropic_adapter.py  # Anthropic Messages ↔ Chat 适配
+│   └── desensitize.py        # 运行时文本压缩与零宽脱敏
 ├── admin/                    # 多账号管理后台（FastAPI + MySQL + Redis）
 │   ├── server.py             # FastAPI 入口、登录、静态页挂载、converter 挂 /gw
 │   ├── config.py             # 配置（环境变量覆盖）
 │   ├── db.py                 # SQLAlchemy 引擎 / 会话 / 建库建表 / 列迁移
 │   ├── models.py             # Account / ApiKey / UsageLog / Schedule ORM
 │   ├── security.py           # JWT、Key 哈希、配额拦截
-│   ├── backend.py            # 复用 converter.CredentialManager 操作单账号（含签到）
-│   ├── scheduler.py          # 轻量定时任务：refresh_balances / sync_models / daily_checkin
+│   ├── backend/              # 单账号上游会话（按域拆分）
+│   │   ├── session.py        # AccountSession：凭据落盘/回写 + 档案与额度
+│   │   ├── checkin.py        # 每日签到
+│   │   ├── growth.py         # 猫猫领养 / 旅行 / 连登 / 活跃上报
+│   │   └── http.py           # 连接池参数、凭据元信息解析
+│   ├── tasks/                # 后台任务实现（一个任务一个文件）
+│   │   └── daily_checkin.py / cat_travel.py / activity_report.py / common.py
+│   ├── scheduler.py          # 调度框架：轮询 schedules 表并分发到 admin/tasks/
 │   ├── turing_token.py       # Python 侧 X-Device-Token 提供器（subprocess 调 helper）
 │   ├── oauth_login.py        # OAuth 设备授权登录（浏览器登录换凭据，不需桌面端）
 │   ├── routers/              # accounts / oauth / keys / proxy / schedules / logs / sync / models
 │   └── static/index.html     # 纯 HTML + TailwindCSS + FontAwesome 管理大屏
+├── deploy/                   # Docker 部署配置（build context 是仓库根目录）
+│   ├── Dockerfile            # converter 独立版（8787，需挂载桌面端 auth）
+│   ├── Dockerfile.admin      # admin 独立版（8790，Sealos / 容器平台）
+│   └── docker-compose.yml
+├── docs/                     # 部署文档：DEPLOY_WINDOWS / DEPLOY_SEALOS / ENV_SETUP
+├── scripts/                  # 本机一键脚本：start_admin / start_converter / 服务安装卸载
+├── tests/                    # pytest：代理重试骨架 + 猫猫旅行状态机
 └── README.md
 
 # 逆向产物（不在本仓库，存在于 D:\workbuddy）

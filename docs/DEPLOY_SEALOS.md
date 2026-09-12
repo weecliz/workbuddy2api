@@ -25,11 +25,11 @@
 这 6 条是读源码确认过的，不是泛泛而谈，直接决定你怎么打包和配置。
 
 1. **「admin 独立」在运行期仍然需要 `converter.py`。**
-   `admin/backend.py:14` 是 `from converter import CredentialManager`，
-   `admin/server.py:27` 也会 `from converter import app`。
-   只打包 `admin/` 目录 → 容器启动直接 `ModuleNotFoundError: No module named 'converter'`。
-   → 所以镜像里必须有：`admin/` + `converter.py` + `responses_adapter.py` +
-   `responses_projection.py` + `anthropic_adapter.py` + `desensitize.py`（`Dockerfile.admin` 已按此写好）。
+   `admin/backend/session.py` 是 `from core.converter import CredentialManager`，
+   `admin/server.py` 也会 `from core.converter import app`（内核模块已归拢到 `core/` 包）。
+   只打包 `admin/` 目录 → 容器启动直接 `ModuleNotFoundError: No module named 'core'`。
+   → 所以镜像里必须有：`admin/` + 整个 `core/` 包（`converter.py` 与 4 个适配模块彼此
+   相对导入，不能只挑 `converter.py`）—— `deploy/Dockerfile.admin` 已按此写好。
 
 2. **MySQL 是硬依赖，Redis 不是。**
    `admin/server.py:70` 的 startup 会执行 `ensure_database()` + `init_db()`（建库 + 建 6 张表 + 列迁移，
@@ -171,7 +171,7 @@ cd D:/Workspace/git/ai/workbuddy2api
 #   *.zip
 #   .workbuddy/
 
-docker build -f Dockerfile.admin -t <你的仓库>/workbuddy2api-admin:v1 .
+docker build -f deploy/Dockerfile.admin -t <你的仓库>/workbuddy2api-admin:v1 .
 docker push <你的仓库>/workbuddy2api-admin:v1
 ```
 
@@ -282,8 +282,8 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 
 - 改 `server.py:166` 的判断条件，加一个环境变量开关，例如
   `if _CONVERTER_EMBEDDED and os.getenv("ADMIN_EMBED_GW", "1") != "0":`，然后部署时设 `ADMIN_EMBED_GW=0`；
-- 或者在 `Dockerfile.admin` 里不 COPY `converter.py` —— **不行**，§1 第 1 条说明了
-  `admin/backend.py` 硬依赖它，去掉会导致启动失败。
+- 或者在 `deploy/Dockerfile.admin` 里不 COPY `core/` —— **不行**，§1 第 1 条说明了
+  `admin/backend/session.py` 硬依赖它，去掉会导致启动失败。
 
 ---
 
@@ -291,7 +291,7 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| 容器反复重启，日志 `ModuleNotFoundError: No module named 'converter'` | 镜像里缺 `converter.py` 等文件，用 `Dockerfile.admin` 重新构建（别只 COPY `admin/`） |
+| 容器反复重启，日志 `ModuleNotFoundError: No module named 'core'` | 镜像里缺 `core/` 包，用 `deploy/Dockerfile.admin` 重新构建（别只 COPY `admin/`） |
 | 启动日志 `Access denied` / `Unknown database` | `ADMIN_DATABASE_URL` 错。**优先怀疑密码特殊字符没 URL 编码**（§3） |
 | 启动卡在 `Can't connect to MySQL` | 用了外网地址或地址写错。同区应用请用 **内网地址**；确认 MySQL 实例已 Running |
 | `docker run` 能起来，Sealos 上一直 Pending/Running 但打不开 | 容器端口填错（必须 `8790`）；或应用监听在 `127.0.0.1` —— 本镜像 CMD 已是 `0.0.0.0` |
@@ -306,7 +306,7 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 
 | 文件 | 状态 | 说明 |
 | --- | --- | --- |
-| `Dockerfile.admin` | **新增** | admin 独立部署镜像定义；根目录原 `Dockerfile` 未改动 |
+| `deploy/Dockerfile.admin` | **新增** | admin 独立部署镜像定义；`deploy/Dockerfile`（converter 版）未改动 |
 | `DEPLOY_SEALOS.md` | **新增** | 本文档 |
 | 其余源码 | **未改动** | 本方案只做容器化，不需要改一行业务代码 |
 

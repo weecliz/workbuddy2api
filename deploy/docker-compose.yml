@@ -1,8 +1,15 @@
 version: "3.8"
 
+# 本文件在 deploy/ 下：build 的 context 是仓库根目录（..），
+# dockerfile 路径相对 context 写。启动请在 deploy/ 目录执行：
+#   docker compose up -d --build
+# 或从仓库根目录： docker compose -f deploy/docker-compose.yml up -d --build
+
 services:
   workbuddy2api:
-    build: .
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
     container_name: workbuddy2api
     ports:
       - "8787:8787"
@@ -15,7 +22,7 @@ services:
       # 指定 auth 文件挂载路径（转换器会自动读取）
       - CODEBUDDY_AUTH_DIR=/data/auth
     command: >
-      python3 converter.py
+      python3 -m core.converter
       --host 0.0.0.0
       --port 8787
       --skip-check
@@ -26,7 +33,11 @@ services:
   # 默认连本机已在运行的 MySQL(3306)/Redis(6379)；若改到容器内实例，
   # 把下方 ADMIN_DATABASE_URL / ADMIN_REDIS_URL 指向对应服务名即可。
   admin:
-    build: .
+    # 必须用 Dockerfile.admin：它才 COPY 了 admin/ 与 core/。
+    # 之前复用了默认 Dockerfile（只装 converter），容器里根本没有 admin/ 目录。
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.admin
     container_name: workbuddy_admin
     ports:
       - "8790:8790"
