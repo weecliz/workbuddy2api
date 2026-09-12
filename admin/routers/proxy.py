@@ -29,8 +29,8 @@ _logger = logging.getLogger("proxy")
 
 # Responses API 适配器（converter 同款）；缺失时 /v1/responses 优雅降级为 501
 try:
-    from responses_adapter import responses_request_to_chat, ResponsesStreamConverter
-    from responses_projection import project_responses_chat_body
+    from core.responses_adapter import responses_request_to_chat, ResponsesStreamConverter
+    from core.responses_projection import project_responses_chat_body
     _RESPONSES_AVAILABLE = True
 except Exception:  # pragma: no cover - 降级分支
     _RESPONSES_AVAILABLE = False
@@ -41,7 +41,7 @@ except Exception:  # pragma: no cover - 降级分支
 # Anthropic Messages 适配器（与 converter 同款，复用同一套双向转换）；
 # 缺失时 /v1/messages 优雅降级为 501，不影响其余端点。
 try:
-    from anthropic_adapter import AnthropicStreamConverter, anthropic_request_to_chat
+    from core.anthropic_adapter import AnthropicStreamConverter, anthropic_request_to_chat
     _ANTHROPIC_AVAILABLE = True
 except Exception:  # pragma: no cover - 降级分支
     _ANTHROPIC_AVAILABLE = False
@@ -52,7 +52,7 @@ except Exception:  # pragma: no cover - 降级分支
 # 里含 "DoS / exploit / credential" 这类合规声明词，会被上游内容审核误判并整条拒绝
 # （典型报错 400 code=11128 "Illegal API invocation from an unapproved channel"）。
 try:
-    from desensitize import desensitize_body
+    from core.desensitize import desensitize_body
     _DESENSITIZE_AVAILABLE = True
 except Exception:  # pragma: no cover - 降级分支
     _DESENSITIZE_AVAILABLE = False

@@ -15,7 +15,7 @@
     checkin.py  每日签到：状态查询与领取
     growth.py   成长中心：猫猫领养 / 旅行 / 连登 / 对话活跃上报
 """
-from converter import CredentialManager
+from core.converter import CredentialManager
 
 from .http import HTTP_LIMITS, parse_auth_meta
 from .session import AccountSession

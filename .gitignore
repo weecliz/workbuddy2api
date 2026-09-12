@@ -10,6 +10,7 @@ __pycache__/
 *$py.class
 *.egg-info/
 .eggs/
+.pytest_cache/
 
 # ===== 密钥 / 本地配置（绝不能上传） =====
 .env

@@ -11,7 +11,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
-from converter import CredentialManager  # 复用既有后端鉴权 / 刷新 / 模型 / 额度逻辑
+from core.converter import CredentialManager  # 复用既有后端鉴权 / 刷新 / 模型 / 额度逻辑
 
 from . import checkin as _checkin
 from . import growth as _growth

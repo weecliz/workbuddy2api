@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-cd /d "%~dp0"
+cd /d "%~dp0.."
 title workbuddy2api - converter
 
 rem ============================================================
@@ -35,8 +35,8 @@ echo ============================================================
 echo.
 
 rem ---------- 0. project file check ----------
-if not exist "converter.py" (
-    echo [ERROR] converter.py not found in the current directory.
+if not exist "core\converter.py" (
+    echo [ERROR] core\converter.py not found in the current directory.
     echo         Put this script in the workbuddy2api project root.
     echo.
     pause
@@ -49,8 +49,8 @@ if defined CONVERTER_PYTHON set "PY=%CONVERTER_PYTHON%"
 
 if not defined PY for %%P in (
     "%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
-    "%~dp0.venv\Scripts\python.exe"
-    "%~dp0venv\Scripts\python.exe"
+    "%~dp0..\.venv\Scripts\python.exe"
+    "%~dp0..\venv\Scripts\python.exe"
 ) do if not defined PY if exist %%P set "PY=%%~P"
 
 if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY set "PY=%%W"
@@ -85,12 +85,12 @@ set "RUN_ARGS=--port %CONVERTER_PORT%"
 if not "%CONVERTER_DESENSITIZE%"=="0" set "RUN_ARGS=%RUN_ARGS% --desensitize"
 set "RUN_ARGS=%RUN_ARGS% --log converter.log"
 
-echo [3/3] command     : converter.py %RUN_ARGS% %*
+echo [3/3] command     : python -m core.converter %RUN_ARGS% %*
 echo.
 echo       Press Ctrl+C to stop the service.
 echo.
 
-"%PY%" converter.py %RUN_ARGS% %*
+"%PY%" -m core.converter %RUN_ARGS% %*
 set "RC=%ERRORLEVEL%"
 
 if not "%RC%"=="0" (

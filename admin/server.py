@@ -25,7 +25,7 @@ from admin.security import (
 # /v1/balance 等协议；与管理后台自带的 /v1/chat/completions、/v1/models（带 Key 配额托管）
 # 路径互不冲突。缺依赖时自动降级为只跑管理后台。
 try:
-    from converter import app as converter_app, CONFIG as _conv_cfg
+    from core.converter import app as converter_app, CONFIG as _conv_cfg
     _CONVERTER_EMBEDDED = True
 except Exception:  # pragma: no cover - 降级分支
     converter_app = None
@@ -180,7 +180,7 @@ if _CONVERTER_EMBEDDED:
     # 注意：服务若以非桌面登录账户运行，需用 CODEBUDDY_AUTH_DIR 指向该账户的 auth 目录。
     if _conv_cfg.get("cred") is None:
         try:
-            from converter import CredentialManager, find_auth_file
+            from core.converter import CredentialManager, find_auth_file
 
             _auth_file = find_auth_file()
             if _auth_file:
