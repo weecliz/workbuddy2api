@@ -20,6 +20,8 @@ class Account(Base):
     status = Column(String(16), default="active")  # active | disabled
     balance_total = Column(Integer, default=0)
     balance_remain = Column(Integer, default=0)
+    # 成长中心连登天数（GET /v2/activity/growth/streak，刷新余额时顺带同步）
+    streak_days = Column(Integer, nullable=True)
     last_sync_at = Column(DateTime, nullable=True)
     last_used_at = Column(DateTime, nullable=True)
     # 稳定性状态机：错误计数 / 冷却 / 防撞号 / 禁用原因

@@ -126,7 +126,7 @@
           <thead class="bg-slate-50 text-slate-500 text-left sticky top-0">
             <tr>
               <th class="px-4 py-3">名称</th><th class="px-4 py-3">UID</th><th class="px-4 py-3">状态</th>
-              <th class="px-4 py-3">总积分</th><th class="px-4 py-3">剩余</th><th class="px-4 py-3">同步</th><th class="px-4 py-3 text-right">操作</th>
+              <th class="px-4 py-3">总积分</th><th class="px-4 py-3">剩余</th><th class="px-4 py-3" title="成长中心连登天数，刷新余额时顺带同步">活跃</th><th class="px-4 py-3">同步</th><th class="px-4 py-3 text-right">操作</th>
             </tr>
           </thead>
           <tbody id="accBody"></tbody>
@@ -451,6 +451,7 @@ function accRow(a) {
       <td class="px-4 py-3">${badge(a.status)}</td>
       <td class="px-4 py-3">${a.balance_total}</td>
       <td class="px-4 py-3 font-medium ${a.balance_remain>0?'text-emerald-600':'text-red-500'}">${a.balance_remain}</td>
+      <td class="px-4 py-3">${a.streak_days==null?'<span class="text-slate-300">-</span>':(a.streak_days>0?`<span class="text-amber-600 font-medium" title="成长中心连登天数（刷新余额时同步）"><i class="fa-solid fa-fire mr-1"></i>${a.streak_days}天</span>`:`<span class="text-slate-400" title="成长中心连登天数（刷新余额时同步）"><i class="fa-regular fa-clock mr-1"></i>0天</span>`)}</td>
       <td class="px-4 py-3 text-slate-400 text-xs whitespace-nowrap">${fmtTime(a.last_sync_at)}</td>
       <td class="px-4 py-3 text-right whitespace-nowrap">
         <button onclick="viewCreditDetails(${a.id})" class="text-amber-600 hover:text-amber-800 mr-1" title="查看积分明细"><i class="fa-solid fa-list-ul"></i></button>
@@ -481,10 +482,10 @@ function renderAccPage(p) {
   p = Math.min(Math.max(1, p), totalPages);
   const slice = data.slice((p - 1) * PS, p * PS);
   $("#accBody").innerHTML = slice.map(accRow).join("") ||
-    `<tr><td colspan="7" class="px-4 py-8 text-center text-slate-400">${term ? "无匹配的账号" : "还没有账号，点「批量上传」"}</td></tr>`;
+    `<tr><td colspan="8" class="px-4 py-8 text-center text-slate-400">${term ? "无匹配的账号" : "还没有账号，点「批量上传」"}</td></tr>`;
   $("#accPager").innerHTML = pagerHtml(total, p, totalPages, "renderAccPage");
 }
-async function refreshAcc(id){ const r=await api("/api/accounts/"+id+"/refresh",{method:"POST"}); toast(r.ok?"余额已刷新":"刷新失败", r.ok?"ok":"err"); if(r.ok) loadAccounts(); }
+async function refreshAcc(id){ const r=await api("/api/accounts/"+id+"/refresh",{method:"POST"}); toast(r.ok?`余额已刷新 · 连登${r.streak_days==null?"-":r.streak_days}天`:"刷新失败", r.ok?"ok":"err"); if(r.ok) loadAccounts(); }
 async function toggleAcc(id,st){ await api("/api/accounts/"+id,{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({status:st})}); loadAccounts(); }
 async function delAcc(id){ if(!confirm("确认删除该账号？"))return; const r=await api("/api/accounts/"+id,{method:"DELETE"}); toast(r.ok?"已删除":"删除失败",r.ok?"ok":"err"); if(r.ok) loadAccounts(); }
 async function injectAcc(id){

@@ -92,6 +92,8 @@ def init_db():
     _ensure_column("accounts", "last_err_at", "DATETIME", "NULL")
     _ensure_column("accounts", "last_err_msg", "VARCHAR(255)", "DEFAULT ''")
     _ensure_column("accounts", "last_picked_at", "DATETIME", "NULL")
+    # 迁移：给 accounts 表加成长中心连登天数（活跃展示；NULL=从未查过）
+    _ensure_column("accounts", "streak_days", "INT", "NULL")
 
     # 迁移：创建 system_settings / schedules 表（create_all 已处理，这里仅兜底）
 

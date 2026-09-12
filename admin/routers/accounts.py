@@ -67,6 +67,12 @@ def _refresh_balance(acc: Account) -> bool:
             bal = sess.fetch_balance()
             acc.balance_total = int(bal.get("total", 0) or 0)
             acc.balance_remain = int(bal.get("remain", 0) or 0)
+            # 顺带查成长中心连登天数（活跃展示）：复用同一会话零额外开销；
+            # 查询失败不影响余额结果（streak_days 保持旧值）
+            try:
+                acc.streak_days = sess.growth_streak_days()
+            except Exception:
+                pass
             acc.auth_json = sess.updated_json()  # 回写可能刷新的 token
         acc.last_sync_at = datetime.utcnow()
         acc.err_count = 0  # 余额拉取成功 = 会话存活，清零三振计数
@@ -88,6 +94,7 @@ def list_accounts(_: bool = Depends(require_admin), db: Session = Depends(get_db
             "status": a.status,
             "balance_total": a.balance_total,
             "balance_remain": a.balance_remain,
+            "streak_days": a.streak_days,
             "last_sync_at": a.last_sync_at.isoformat() if a.last_sync_at else None,
             "last_used_at": a.last_used_at.isoformat() if a.last_used_at else None,
             "created_at": a.created_at.isoformat() if a.created_at else None,
@@ -273,7 +280,8 @@ def refresh_account(acc_id: int, _: bool = Depends(require_admin), db: Session =
     db.commit()
     if not ok:
         raise HTTPException(status_code=502, detail="刷新失败：后端调用异常（凭据/限流）")
-    return {"id": acc.id, "balance_total": acc.balance_total, "balance_remain": acc.balance_remain}
+    return {"id": acc.id, "balance_total": acc.balance_total, "balance_remain": acc.balance_remain,
+            "streak_days": acc.streak_days}
 
 
 @router.get("/{acc_id}/credit-details")
