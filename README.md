@@ -693,7 +693,15 @@ D:\workbuddy\resources\app.asar.unpacked\native\turing-sdk\   # 设备风控原�
 
 ## 九、免责声明与协议
 
-本项目仅用于个人学习与研究。与腾讯、WorkBuddy、CodeBuddy、OpenAI、Anthropic 无官方关联。请仅在你合法拥有订阅的前提下使用，并自行承担风险。
+**与上游服务提供方**：本项目仅用于个人学习与研究，与腾讯、WorkBuddy / CodeBuddy、
+OpenAI、Anthropic **无任何官方关联**，也未获得其授权或背书。请仅在你合法拥有订阅的
+前提下使用，并自行承担风险。
+
+**与上游开源项目**：本仓库最初派生自
+[xiaofan6ya/workbuddy2api](https://github.com/xiaofan6ya/workbuddy2api)，
+此后为独立开发与维护。上游项目的作者不对本仓库的代码、行为及其产生的任何问题负责，
+本仓库的改动亦不代表上游项目的立场。上游同样以 MIT 协议发布，原版权声明保留在
+[LICENSE](./LICENSE) 中。
 
 协议：[MIT](./LICENSE)
 
