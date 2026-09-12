@@ -689,4 +689,10 @@ D:\workbuddy\resources\app.asar.unpacked\native\turing-sdk\   # 设备风控原�
 
 协议：[MIT](./LICENSE)
 
+---
+
+## 十、更新日志
+
+每次功能 / 修复 / 重构的变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
+
 > 致谢：本项目基于 [HanHan666666/codebuddy2openai](https://github.com/HanHan666666/codebuddy2openai) 的思路演进而来，感谢原作者的开源贡献。
