@@ -167,6 +167,7 @@ def run_cat_travel(db, schedule: "Schedule | None" = None) -> dict:
 
     departed = claimed = adopted = skipped = failed = 0
     errors: list[str] = []
+    details: list[str] = []
     for a in db.query(Account).filter(Account.status == "active").all():
         try:
             with be.AccountSession(a.auth_json) as sess:
@@ -175,46 +176,59 @@ def run_cat_travel(db, schedule: "Schedule | None" = None) -> dict:
                     if buddy is None:
                         if _adopt_tried_today(a.uid or ""):
                             skipped += 1  # 当日已判定门槛未达，不再重试
+                            details.append(f"acc{a.id}:防抖跳过(当日领养门槛未达,先跑活跃上报刷对话量)")
                         else:
                             sess.buddy_agreement()  # 幂等
                             try:
                                 sess.buddy_first()
                                 adopted += 1
+                                details.append(f"acc{a.id}:领养成功(+300)")
                             except Exception as e:
                                 if _is_adopt_threshold_error(e):
                                     _mark_adopt_tried(a.uid or "")
                                     skipped += 1
+                                    details.append(f"acc{a.id}:领养门槛未达(需对话量,先跑活跃上报)")
                                 else:
                                     raise
                     else:
                         st = sess.travel_status()
                         state = st.get("state")
+                        name = (buddy.get("name") if isinstance(buddy, dict) else None) or "猫"
                         if state == "arrived":
                             rid = int(st.get("record_id") or 0)
                             if rid:
-                                sess.travel_claim(rid)
+                                reward = sess.travel_claim(rid)
                                 claimed += 1
+                                details.append(f"acc{a.id}:领奖+{reward}({name})")
                             else:
                                 skipped += 1  # arrived 但无 record_id，无法领奖
+                                details.append(f"acc{a.id}:到站但缺record_id,无法领奖")
                         elif state == "idle":
                             if st.get("daily_limit_reached"):
                                 skipped += 1  # 服务端明确名额已用完，不白撞
+                                details.append(f"acc{a.id}:今日名额已用完({name})")
                             else:
                                 sess.travel_depart(_TRAVEL_LOCATION_ID)
                                 departed += 1
+                                details.append(f"acc{a.id}:已派出(地点{_TRAVEL_LOCATION_ID},{name})")
+                        elif state == "traveling":
+                            skipped += 1
+                            details.append(f"acc{a.id}:旅行中({name},record={st.get('record_id') or '-'})")
                         else:
-                            skipped += 1  # traveling / 未知状态
+                            skipped += 1  # 未知状态
+                            details.append(f"acc{a.id}:未知状态{state!r}")
                 finally:
                     # 无论中途是否失败，把可能已刷新的 token 写回
                     a.auth_json = sess.updated_json()
         except Exception as e:
             failed += 1
             errors.append(f"acc{a.id}:{e}")
+            details.append(f"acc{a.id}:失败:{str(e)[:60]}")
         time.sleep(_ACCOUNT_DELAY)
     db.commit()
     return {"task": "cat_travel", "departed": departed, "claimed": claimed,
             "adopted": adopted, "skipped": skipped, "failed": failed,
-            "errors": errors[:10]}
+            "details": details[:20], "errors": errors[:10]}
 
 
 def run_activity_report(db, schedule: "Schedule | None" = None) -> dict:
@@ -234,6 +248,7 @@ def run_activity_report(db, schedule: "Schedule | None" = None) -> dict:
     reported = failed = 0
     streak_warns: list[str] = []
     errors: list[str] = []
+    details: list[str] = []
     for a in db.query(Account).filter(Account.status == "active").all():
         try:
             with be.AccountSession(a.auth_json) as sess:
@@ -249,39 +264,51 @@ def run_activity_report(db, schedule: "Schedule | None" = None) -> dict:
                     a.auth_json = sess.updated_json()  # token 始终写回
                 if ok < count:
                     errors.append(f"acc{a.id}:上报中断({ok}/{count})")
+                    details.append(f"acc{a.id}:上报中断({ok}/{count})")
                     continue  # 未发满：streak 自检与补领养均无意义
                 reported += 1
                 # streak 自检（只读 oracle，失败不影响主流程）
+                streak_note = ""
                 try:
-                    if sess.growth_streak_days() == 0:
+                    days = sess.growth_streak_days()
+                    if days == 0:
                         streak_warns.append(f"acc{a.id}")  # 上报 OK 但连登为 0
+                        streak_note = ",连登可疑(0,疑似静默丢弃)"
+                    else:
+                        streak_note = f",连登{days}天"
                 except Exception:
                     streak_warns.append(f"acc{a.id}")
+                    streak_note = ",连登回读失败"
                 # 无猫账号：对话量刚补满 → 立即重试领养（豁免当日防抖）
+                adopt_note = ""
                 if sess.buddy_info() is None:
                     sess.buddy_agreement()
                     try:
                         sess.buddy_first()
+                        adopt_note = ",补领养成功(+300)"
                     except Exception as e:
                         if _is_adopt_threshold_error(e):
                             _mark_adopt_tried(a.uid or "")
+                            adopt_note = ",补领养门槛仍未达"
                         # 其他领养错误静默：上报已成功，不影响本轮结果
+                details.append(f"acc{a.id}:上报{ok}/{count}{streak_note}{adopt_note}")
         except Exception as e:
             failed += 1
             errors.append(f"acc{a.id}:{e}")
+            details.append(f"acc{a.id}:失败:{str(e)[:60]}")
         time.sleep(_ACCOUNT_DELAY)
     db.commit()
     return {"task": "activity_report", "reported": reported, "failed": failed,
             "count_per_account": count, "streak_warn": streak_warns,
-            "errors": errors[:10]}
+            "details": details[:20], "errors": errors[:10]}
 
 
 def _run_one(s: Schedule, db, now: datetime):
     try:
         result = run_task(s.task, db, s)
-        s.last_result = json.dumps(result, ensure_ascii=False)[:500]
+        s.last_result = json.dumps(result, ensure_ascii=False)[:2000]
     except Exception as e:  # 单个任务失败不影响调度循环
-        s.last_result = f"执行失败: {e}"[:500]
+        s.last_result = f"执行失败: {e}"[:2000]
     s.last_run_at = now
     s.next_run_at = now + timedelta(minutes=s.interval_minutes or 60)
     db.commit()

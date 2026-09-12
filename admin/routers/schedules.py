@@ -133,7 +133,7 @@ def run_now(sid: int, _: bool = Depends(require_admin), db: Session = Depends(ge
     _run = run_task(s.task, db, s)
     s.last_run_at = now
     s.next_run_at = now + timedelta(minutes=s.interval_minutes or 60)
-    s.last_result = __import__("json").dumps(_run, ensure_ascii=False)[:500]
+    s.last_result = __import__("json").dumps(_run, ensure_ascii=False)[:2000]
     db.commit()
     return {"id": s.id, "result": _run}
 
