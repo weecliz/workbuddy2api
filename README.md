@@ -17,6 +17,7 @@
 
 ## 目录
 
+- [更新日志](#更新日志)
 - [一、逆向工程：解包 WorkBuddy 桌面端源码（app_source）](#一逆向工程解包-workbuddy-桌面端源码app_source)
 - [二、逆向反代核心（workbuddy2api 网关）](#二逆向反代核心workbuddy2api-网关)
 - [三、多账号代理共享平台（admin）](#三多账号代理共享平台admin)
@@ -26,6 +27,13 @@
 - [七、日志与排障](#七日志与排障)
 - [八、项目结构](#八项目结构)
 - [九、免责声明与协议](#九免责声明与协议)
+
+---
+
+## 更新日志
+
+功能新增、缺陷修复、重构与目录调整的完整记录见 **[CHANGELOG.md](./CHANGELOG.md)**
+（按日期归档，最新在最上面）。
 
 ---
 
@@ -688,11 +696,5 @@ D:\workbuddy\resources\app.asar.unpacked\native\turing-sdk\   # 设备风控原�
 本项目仅用于个人学习与研究。与腾讯、WorkBuddy、CodeBuddy、OpenAI、Anthropic 无官方关联。请仅在你合法拥有订阅的前提下使用，并自行承担风险。
 
 协议：[MIT](./LICENSE)
-
----
-
-## 十、更新日志
-
-每次功能 / 修复 / 重构的变更记录见 [CHANGELOG.md](./CHANGELOG.md)。
 
 > 致谢：本项目基于 [HanHan666666/codebuddy2openai](https://github.com/HanHan666666/codebuddy2openai) 的思路演进而来，感谢原作者的开源贡献。
