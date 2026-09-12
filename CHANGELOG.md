@@ -43,6 +43,9 @@
 - **项目目录归拢**：新增 `core/`（内核模块）、`docs/`（部署文档）、`deploy/`（Docker）、
   `examples/`（客户端接入示例）、`scripts/`（本机脚本）；`main.py` 与
   `service_admin.py` 作为入口留在根目录
+- **仓库脱离 fork 关系**：本仓库原为 `xiaofan6ya/workbuddy2api` 的 fork，
+  现重建为**独立仓库**（提交历史完整保留，URL 不变）。GitHub 上不再显示
+  「领先/落后上游」的对比条与「同步复刻」按钮
 - **测试固化**：`tests/` 下 20 项（代理重试骨架 11 + 猫猫旅行状态机 9）
 
 ### 修复
