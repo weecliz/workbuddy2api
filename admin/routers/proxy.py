@@ -646,6 +646,197 @@ def _map_anthropic_model(db: Session, model: str) -> str:
     return "auto"
 
 
+# ---------------------------------------------------------------------------
+# 代理重试骨架：所有 /v1/* 上游端点共用的「候选模型 × 账号」双循环。
+#
+# 五个端点（chat / responses / anthropic，各分流式与非流式）原本各持一份
+# 相同的重试循环，这里收敛为一份：分类、策略、换号、成功清零三振计数、
+# 记账全部只写一次；协议差异通过三个回调注入（make_consumer / emit_*）。
+# ---------------------------------------------------------------------------
+
+# 这些分类视为「可重试」：立即换下一个账号/模型，绝不把中断感传递给客户端
+_RETRYABLE_KINDS = ("hard_credit", "session_dead", "soft_rate", "not_found", "server")
+
+
+class _Attempt:
+    """一次上游尝试的输出容器，由协议层 consume 回调填充。
+
+    result      非流式聚合结果（由 consume 写入，骨架转发给 _ProxyOutcome）
+    usage_parts 参与 _parse_usage 的原始文本片段；连接符 usage_join 由协议决定
+                （chunk 流用 "" —— 片段自带 SSE 换行；行流用 "\\n"）
+    delivered   是否已有任何内容发给客户端；发过之后出错只能中止，不得换号
+                （否则客户端会收到重复内容），该标记只在流式协议下会变 True。
+    """
+
+    def __init__(self):
+        self.result = None
+        self.usage_parts: list = []
+        self.usage_join = ""
+        self.delivered = False
+        self._ttfb_at = None
+
+    def mark_ttfb(self):
+        """协议层在拿到首个有效数据时调用（空行/心跳不算）。"""
+        if self._ttfb_at is None:
+            self._ttfb_at = time.perf_counter()
+
+    @property
+    def ttfb_at(self):
+        return self._ttfb_at
+
+    @property
+    def usage_text(self):
+        return self.usage_join.join(self.usage_parts)
+
+
+class _ProxyOutcome:
+    """非流式模式的结果容器；流式模式不使用（骨架直接 yield 数据块）。"""
+
+    def __init__(self):
+        self.response = None
+
+    def take(self):
+        if self.response is not None:
+            return self.response
+        # emit_exhausted 忘记设置的兜底（不应发生，保留以防万一）
+        return JSONResponse(status_code=503,
+                            content={"error": {"message": "所有账号/候选模型均不可用",
+                                               "type": "no_model_available"}})
+
+
+async def _proxy_loop(
+    *, key_id: int, request: Request, chat_body: dict, order: list, url: str,
+    use_case: str, mode_label: str, initial_model: str, upstream_stream: bool,
+    make_consumer, emit_client_error, emit_exhausted, out: _ProxyOutcome | None = None,
+):
+    """代理重试骨架：候选模型 × 每模型 3 次选号的双循环。
+
+    每次尝试：选号（tried_ids 防重）→ 建会话 → 请求 → _classify_error →
+    _apply_account_policy → 可重试（_RETRYABLE_KINDS）则换号继续。
+    成功路径只有一份：last_used_at + 清零三振计数 + TTFB/延迟统计 +
+    表格日志 + 用量记账。
+
+    协议差异通过三个回调注入：
+      make_consumer()     -> 返回 consume(r, att) async generator，消费成功响应：
+                             流式协议逐块 yield 给客户端并填充 att；
+                             非流式协议把聚合结果写入 att.result（不 yield）。
+      emit_client_error() -> 不可重试的 4xx 输出：流式返回要转发的字符串（骨架
+                             负责 yield）；非流式把 JSONResponse 写入 out 并返回 None。
+      emit_exhausted()    -> 全部候选耗尽的最终输出，同上，参数为 (err_kind, has_err)。
+
+    流式模式（out=None）：本函数本身是 async generator，直接交给 StreamingResponse。
+    非流式模式：本函数不对外 yield 任何块，端点以 `async for _ in ...: pass` 驱动，
+    然后取 out.take() 作为响应返回。
+    """
+    db2 = SessionLocal()
+    try:
+        request_start = time.perf_counter()
+        seq = None
+        final_model = initial_model
+        last_err_kind = ""
+        last_err_msg = ""
+        async with httpx.AsyncClient(timeout=300, limits=backend.HTTP_LIMITS) as client:
+            for m in order:
+                body = dict(chat_body)
+                body["model"] = m
+                tried_ids: set = set()
+                for _ in range(3):
+                    acc = _select_account(db2, exclude_ids=tried_ids, min_balance=1)
+                    if not acc:
+                        break
+                    tried_ids.add(acc.id)
+                    sess = _account_session_safe(db2, acc)
+                    if sess is None:
+                        continue
+                    headers = sess.get_headers(extra=_upstream_extra_headers(request))
+                    att = _Attempt()
+                    try:
+                        if upstream_stream:
+                            async with client.stream("POST", url, headers=headers, json=body) as r:
+                                if r.status_code >= 400:
+                                    detail = await r.aread()
+                                    text = (detail[:500].decode(errors="ignore")
+                                            if isinstance(detail, bytes) else str(detail)[:500])
+                                    kind = _classify_error(r.status_code, text)
+                                    _apply_account_policy(db2, acc, kind, r.status_code, text)
+                                    if kind not in _RETRYABLE_KINDS:
+                                        piece = emit_client_error(r.status_code, text)
+                                        if piece is not None:
+                                            yield piece
+                                        sess.close()
+                                        return
+                                    last_err_kind, last_err_msg = kind, text
+                                    sess.close()
+                                    continue
+                                consume = make_consumer()
+                                async for piece in consume(r, att):
+                                    yield piece
+                        else:
+                            r = await client.post(url, headers=headers, json=body)
+                            if r.status_code >= 400:
+                                text = r.text[:500]
+                                kind = _classify_error(r.status_code, text)
+                                _apply_account_policy(db2, acc, kind, r.status_code, text)
+                                if kind not in _RETRYABLE_KINDS:
+                                    piece = emit_client_error(r.status_code, text)
+                                    if piece is not None:
+                                        yield piece
+                                    sess.close()
+                                    return
+                                last_err_kind, last_err_msg = kind, text
+                                sess.close()
+                                continue
+                            consume = make_consumer()
+                            async for piece in consume(r, att):
+                                yield piece
+                        # ---- 成功路径（全端点唯一一份）----
+                        acc.last_used_at = datetime.utcnow()
+                        acc.err_count = 0  # 成功即清零三振计数
+                        db2.commit()
+                        usage = _parse_usage(att.usage_text)
+                        total_toks = usage["total_tokens"] or usage["completion_tokens"]
+                        latency_ms = int((time.perf_counter() - request_start) * 1000)
+                        ttfb_ms = int((att.ttfb_at - request_start) * 1000) if att.ttfb_at else None
+                        seq = _log_chat_row(ttfb_ms, latency_ms, m, mode_label, acc.uid or "-", 200,
+                                            total_toks, error_kind="success")
+                        updated = sess.updated_json()
+                        sess.close()
+                        _record_usage(key_id, acc.id, m, usage["credits"], updated,
+                                      client_ip=_client_ip(request), use_case=use_case,
+                                      prompt_tokens=usage["prompt_tokens"],
+                                      completion_tokens=usage["completion_tokens"],
+                                      total_tokens=usage["total_tokens"],
+                                      cached_tokens=usage["cached_tokens"],
+                                      seq=seq, ttfb_ms=ttfb_ms, latency_ms=latency_ms,
+                                      error_kind="success")
+                        if out is not None:
+                            out.response = att.result
+                        return
+                    except Exception as e:
+                        if att.delivered:
+                            # 已向客户端吐过内容：换号会造成内容重复，只能中止
+                            sess.close()
+                            return
+                        kind = _classify_error(0, str(e))
+                        _apply_account_policy(db2, acc, kind, 0, str(e))
+                        last_err_kind, last_err_msg = kind, str(e)
+                        sess.close()
+                        continue
+        # 全部账号/模型均失败
+        latency_ms = int((time.perf_counter() - request_start) * 1000)
+        err_kind = last_err_kind or ("no_account" if not last_err_msg else "transport")
+        seq = _log_chat_row(None, latency_ms, final_model, mode_label, "-", 503, None,
+                            error_kind=err_kind)
+        _record_usage(key_id, 0, final_model, 0.0, None,
+                      client_ip=_client_ip(request), use_case=use_case, seq=seq,
+                      latency_ms=latency_ms, error_kind=err_kind)
+        piece = emit_exhausted(err_kind, bool(last_err_kind))
+        if piece is not None:
+            yield piece
+    finally:
+        db2.close()
+
+
 @router.post("/v1/chat/completions")
 async def chat_completions(
     request: Request,
@@ -707,116 +898,34 @@ async def chat_completions(
 
     url = f"{settings.BACKEND}/v2/chat/completions"
 
-    async def _stream():
-        """带账号级重试 + 错误状态机 + 表格日志的流式代理。"""
-        db2 = SessionLocal()
-        try:
-            request_start = time.perf_counter()
-            ttfb_at = None
-            status_out = 503
-            seq = None
-            mode = "stream"
-            final_model = resolved_model or model
-            final_acc_id = 0
-            final_uid = "-"
-            total_toks = None
-            collected = []
-            delivered = False
-            last_err_kind = ""
-            last_err_msg = ""
+    # 协议回调：Chat SSE —— 上游 chunk 原样透传给客户端
+    def make_consumer():
+        async def consume(r, att):
+            async for chunk in r.aiter_text():
+                att.mark_ttfb()
+                att.delivered = True
+                att.usage_parts.append(chunk)
+                yield chunk
+        return consume
 
-            async with httpx.AsyncClient(timeout=300, limits=backend.HTTP_LIMITS) as client:
-                for m in order:
-                    body["model"] = m
-                    tried_ids: set = set()
-                    for attempt in range(3):
-                        acc_i = _select_account(db2, exclude_ids=tried_ids, min_balance=1)
-                        if not acc_i:
-                            break
-                        tried_ids.add(acc_i.id)
-                        sess_i = _account_session_safe(db2, acc_i)
-                        if sess_i is None:
-                            continue
-                        headers_i = sess_i.get_headers(extra=_upstream_extra_headers(request))
-                        try:
-                            async with client.stream("POST", url, headers=headers_i, json=body) as r:
-                                if r.status_code >= 400:
-                                    detail = await r.aread()
-                                    text = detail[:500].decode(errors="ignore") if isinstance(detail, bytes) else str(detail)[:500]
-                                    kind = _classify_error(r.status_code, text)
-                                    _apply_account_policy(db2, acc_i, kind, r.status_code, text)
-                                    # 余额不足 / session 死亡 / 限流 / 上游 5xx / 404 都属于"可重试"，
-                                    # 立即换下一个账号，绝不把中断感传递给客户端。
-                                    if kind in ("hard_credit", "session_dead", "soft_rate", "not_found", "server"):
-                                        last_err_kind = kind
-                                        last_err_msg = text
-                                        sess_i.close()
-                                        continue
-                                    # 不可重试的客户端错误（400/403等）才原样返回
-                                    if not delivered:
-                                        yield text
-                                    sess_i.close()
-                                    return
-                                # 成功连接：标记使用时刻并记录最终信息
-                                final_model = m
-                                final_acc_id = acc_i.id
-                                final_uid = acc_i.uid or "-"
-                                acc_i.last_used_at = datetime.utcnow()
-                                acc_i.err_count = 0  # 成功即清零三振计数
-                                db2.commit()
-                                async for chunk in r.aiter_text():
-                                    if ttfb_at is None:
-                                        ttfb_at = time.perf_counter()
-                                    collected.append(chunk)
-                                    delivered = True
-                                    yield chunk
-                            # 流式完成 → 记账 / 表格日志
-                            text = "".join(collected)
-                            usage = _parse_usage(text)
-                            total_toks = usage["total_tokens"] or usage["completion_tokens"]
-                            status_out = 200
-                            latency_ms = int((time.perf_counter() - request_start) * 1000)
-                            ttfb_ms = int((ttfb_at - request_start) * 1000) if ttfb_at else None
-                            seq = _log_chat_row(ttfb_ms, latency_ms, final_model, mode, final_uid,
-                                                status_out, total_toks, error_kind="success")
-                            updated = sess_i.updated_json()
-                            sess_i.close()
-                            _record_usage(key.id, final_acc_id, final_model, usage["credits"], updated,
-                                          client_ip=_client_ip(request), use_case="chat-completion",
-                                          prompt_tokens=usage["prompt_tokens"],
-                                          completion_tokens=usage["completion_tokens"],
-                                          total_tokens=usage["total_tokens"],
-                                          cached_tokens=usage["cached_tokens"],
-                                          seq=seq, ttfb_ms=ttfb_ms, latency_ms=latency_ms,
-                                          error_kind="success")
-                            return
-                        except Exception as e:
-                            if delivered:
-                                sess_i.close()
-                                return
-                            kind = _classify_error(0, str(e))
-                            _apply_account_policy(db2, acc_i, kind, 0, str(e))
-                            # 网络/传输错误也换号重试
-                            if kind == "transport":
-                                last_err_kind = kind
-                                last_err_msg = str(e)
-                                sess_i.close()
-                                continue
-                            last_err_kind = kind
-                            last_err_msg = str(e)
-                            sess_i.close()
-                            continue
-            # 全部账号/模型均失败
-            latency_ms = int((time.perf_counter() - request_start) * 1000)
-            err_kind = last_err_kind or ("no_account" if not last_err_msg else "transport")
-            seq = _log_chat_row(None, latency_ms, final_model, mode, "-", status_out, None, error_kind=err_kind)
-            _record_usage(key.id, 0, final_model, 0.0, None,
-                          client_ip=_client_ip(request), use_case="chat-completion", seq=seq, latency_ms=latency_ms,
-                          error_kind=err_kind)
-            err_msg = f"所有账号/候选模型均不可用（最后错误：{last_err_kind}）" if last_err_kind else "无可用账号或模型"
-            yield f"data: {json.dumps({'error': {'message': err_msg, 'type': 'no_model_available'}}, ensure_ascii=False)}\n\n"
-        finally:
-            db2.close()
+    def emit_client_error(_status, text):
+        # 不可重试的客户端错误：原样透出上游错误文本（历史行为，保持兼容）
+        return text
+
+    def emit_exhausted(err_kind, has_err):
+        msg = (f"所有账号/候选模型均不可用（最后错误：{err_kind}）"
+               if has_err else "无可用账号或模型")
+        return f"data: {json.dumps({'error': {'message': msg, 'type': 'no_model_available'}}, ensure_ascii=False)}\n\n"
+
+    async def _stream():
+        async for piece in _proxy_loop(
+            key_id=key.id, request=request, chat_body=body, order=order, url=url,
+            use_case="chat-completion", mode_label="stream",
+            initial_model=resolved_model or model, upstream_stream=True,
+            make_consumer=make_consumer, emit_client_error=emit_client_error,
+            emit_exhausted=emit_exhausted,
+        ):
+            yield piece
 
     return StreamingResponse(_stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -888,173 +997,78 @@ async def responses_proxy(
     url = f"{settings.BACKEND}/v2/chat/completions"
 
     if not client_wants_stream:
-        # 非流式：内部重试，成功后聚合为单一 Response 对象
-        db2 = SessionLocal()
-        try:
-            for m in order:
-                body = dict(chat_body)
-                body["model"] = m
-                tried_ids: set = set()
-                for _ in range(3):
-                    acc_i = _select_account(db2, exclude_ids=tried_ids, min_balance=1)
-                    if not acc_i:
-                        break
-                    tried_ids.add(acc_i.id)
-                    sess_i = _account_session_safe(db2, acc_i)
-                    if sess_i is None:
+        # 非流式：内部重试，成功后聚合为单一 Response 对象。
+        # 骨架不对外 yield 任何块，用 async for 驱动后取 out.take()。
+        out = _ProxyOutcome()
+
+        def make_consumer():
+            async def consume(r, att):
+                converter = ResponsesStreamConverter(model=model_name)
+                for line in r.text.splitlines():
+                    if not line.strip():
                         continue
-                    headers_i = sess_i.get_headers(extra=_upstream_extra_headers(request))
-                    try:
-                        async with httpx.AsyncClient(timeout=300, limits=backend.HTTP_LIMITS) as client:
-                            r = await client.post(url, headers=headers_i, json=body)
-                            if r.status_code >= 400:
-                                text = r.text[:500]
-                                kind = _classify_error(r.status_code, text)
-                                _apply_account_policy(db2, acc_i, kind, r.status_code, text)
-                                if kind in ("hard_credit", "session_dead", "soft_rate", "not_found", "server"):
-                                    sess_i.close()
-                                    continue
-                                sess_i.close()
-                                return JSONResponse(status_code=r.status_code,
-                                                    content={"error": {"message": text, "code": r.status_code}})
-                            converter = ResponsesStreamConverter(model=model_name)
-                            for line in r.text.splitlines():
-                                if not line.strip():
-                                    continue
-                                converter.feed_line(line)
-                            converter.finish()
-                            obj = converter.get_nonstream_response()
-                            cost_info = _parse_usage(r.text)
-                            acc_i.last_used_at = datetime.utcnow()
-                            acc_i.err_count = 0  # 成功即清零三振计数
-                            db2.commit()
-                            updated = sess_i.updated_json()
-                            total_toks = cost_info["total_tokens"] or cost_info["completion_tokens"]
-                            seq = _log_chat_row(None, None, m, "resp", acc_i.uid or "-", 200, total_toks, error_kind="success")
-                            sess_i.close()
-                            _record_usage(key.id, acc_i.id, m, cost_info["credits"], updated,
-                                          client_ip=_client_ip(request), use_case="responses",
-                                          prompt_tokens=cost_info["prompt_tokens"],
-                                          completion_tokens=cost_info["completion_tokens"],
-                                          total_tokens=cost_info["total_tokens"],
-                                          cached_tokens=cost_info["cached_tokens"],
-                                          seq=seq, error_kind="success")
-                            return JSONResponse(content=obj)
-                    except Exception as e:
-                        kind = _classify_error(0, str(e))
-                        _apply_account_policy(db2, acc_i, kind, 0, str(e))
-                        sess_i.close()
-                        continue
-            seq = _log_chat_row(None, None, resolved, "resp", "-", 503, None, error_kind="no_account")
-            _record_usage(key.id, 0, resolved, 0.0, None,
-                          client_ip=_client_ip(request), use_case="responses", seq=seq, error_kind="no_account")
-            return JSONResponse(status_code=503,
-                                content={"error": {"message": "所有账号/候选模型均不可用", "type": "no_model_available"}})
-        finally:
-            db2.close()
+                    converter.feed_line(line)
+                converter.finish()
+                att.result = converter.get_nonstream_response()
+                att.usage_parts.append(r.text)
+                return
+                yield  # pragma: no cover —— 仅为统一骨架的 async generator 接口
+            return consume
+
+        def emit_client_error(status, text):
+            out.response = JSONResponse(status_code=status,
+                                        content={"error": {"message": text, "code": status}})
+
+        def emit_exhausted(_err_kind, _has_err):
+            out.response = JSONResponse(status_code=503,
+                                        content={"error": {"message": "所有账号/候选模型均不可用",
+                                                           "type": "no_model_available"}})
+
+        async for _ in _proxy_loop(
+            key_id=key.id, request=request, chat_body=chat_body, order=order, url=url,
+            use_case="responses", mode_label="resp", initial_model=resolved,
+            upstream_stream=False, out=out,
+            make_consumer=make_consumer, emit_client_error=emit_client_error,
+            emit_exhausted=emit_exhausted,
+        ):
+            pass
+        return out.take()
+
+    # 协议回调：Responses SSE —— Chat 事件经 ResponsesStreamConverter 转换后转发
+    def make_consumer():
+        async def consume(r, att):
+            converter = ResponsesStreamConverter(model=model_name)
+            att.usage_join = "\n"
+            async for line in r.aiter_lines():
+                if not line.strip():
+                    continue
+                att.mark_ttfb()
+                events = converter.feed_line(line)
+                if events:
+                    att.delivered = True
+                    yield events
+                att.usage_parts.append(line)
+            finish = converter.finish()
+            if finish:
+                att.delivered = True
+                yield finish
+        return consume
+
+    def emit_client_error(status, text):
+        return f"data: {json.dumps({'type': 'error', 'error': {'message': text, 'code': status}}, ensure_ascii=False)}\n\n"
+
+    def emit_exhausted(err_kind, _has_err):
+        return f"data: {json.dumps({'type': 'error', 'error': {'message': f'所有账号/候选模型均不可用（最后错误：{err_kind}）', 'code': 503}}, ensure_ascii=False)}\n\n"
 
     async def _stream():
-        db2 = SessionLocal()
-        try:
-            request_start = time.perf_counter()
-            ttfb_at = None
-            seq = None
-            final_model = resolved
-            final_acc_id = 0
-            final_uid = "-"
-            total_toks = None
-            raw_lines: list[str] = []
-            delivered = False
-            last_err_kind = ""
-            last_err_msg = ""
-
-            async with httpx.AsyncClient(timeout=300, limits=backend.HTTP_LIMITS) as client:
-                for m in order:
-                    body = dict(chat_body)
-                    body["model"] = m
-                    tried_ids: set = set()
-                    for _ in range(3):
-                        acc_i = _select_account(db2, exclude_ids=tried_ids, min_balance=1)
-                        if not acc_i:
-                            break
-                        tried_ids.add(acc_i.id)
-                        sess_i = _account_session_safe(db2, acc_i)
-                        if sess_i is None:
-                            continue
-                        headers_i = sess_i.get_headers(extra=_upstream_extra_headers(request))
-                        converter = ResponsesStreamConverter(model=model_name)
-                        try:
-                            async with client.stream("POST", url, headers=headers_i, json=body) as r:
-                                if r.status_code >= 400:
-                                    detail = await r.aread()
-                                    text = detail[:500].decode(errors="ignore") if isinstance(detail, bytes) else str(detail)[:500]
-                                    kind = _classify_error(r.status_code, text)
-                                    _apply_account_policy(db2, acc_i, kind, r.status_code, text)
-                                    if kind in ("hard_credit", "session_dead", "soft_rate", "not_found", "server"):
-                                        last_err_kind = kind
-                                        last_err_msg = text
-                                        sess_i.close()
-                                        continue
-                                    yield f"data: {json.dumps({'type': 'error', 'error': {'message': text, 'code': r.status_code}}, ensure_ascii=False)}\n\n"
-                                    sess_i.close()
-                                    return
-                                final_model = m
-                                final_acc_id = acc_i.id
-                                final_uid = acc_i.uid or "-"
-                                acc_i.last_used_at = datetime.utcnow()
-                                acc_i.err_count = 0  # 成功即清零三振计数
-                                db2.commit()
-                                async for line in r.aiter_lines():
-                                    if not line.strip():
-                                        continue
-                                    if ttfb_at is None:
-                                        ttfb_at = time.perf_counter()
-                                    events = converter.feed_line(line)
-                                    if events:
-                                        delivered = True
-                                        yield events
-                                    raw_lines.append(line)
-                            finish = converter.finish()
-                            if finish:
-                                delivered = True
-                                yield finish
-                            text = "\n".join(raw_lines)
-                            usage = _parse_usage(text)
-                            total_toks = usage["total_tokens"] or usage["completion_tokens"]
-                            latency_ms = int((time.perf_counter() - request_start) * 1000)
-                            ttfb_ms = int((ttfb_at - request_start) * 1000) if ttfb_at else None
-                            seq = _log_chat_row(ttfb_ms, latency_ms, final_model, "resp", final_uid, 200, total_toks, error_kind="success")
-                            updated = sess_i.updated_json()
-                            sess_i.close()
-                            _record_usage(key.id, final_acc_id, final_model, usage["credits"], updated,
-                                          client_ip=_client_ip(request), use_case="responses",
-                                          prompt_tokens=usage["prompt_tokens"],
-                                          completion_tokens=usage["completion_tokens"],
-                                          total_tokens=usage["total_tokens"],
-                                          cached_tokens=usage["cached_tokens"],
-                                          seq=seq, ttfb_ms=ttfb_ms, latency_ms=latency_ms,
-                                          error_kind="success")
-                            return
-                        except Exception as e:
-                            if delivered:
-                                sess_i.close()
-                                return
-                            kind = _classify_error(0, str(e))
-                            _apply_account_policy(db2, acc_i, kind, 0, str(e))
-                            if kind == "transport":
-                                last_err_kind = kind
-                                last_err_msg = str(e)
-                            sess_i.close()
-                            continue
-            latency_ms = int((time.perf_counter() - request_start) * 1000)
-            err_kind = last_err_kind or "no_account"
-            seq = _log_chat_row(None, latency_ms, final_model, "resp", "-", 503, None, error_kind=err_kind)
-            _record_usage(key.id, 0, final_model, 0.0, None,
-                          client_ip=_client_ip(request), use_case="responses", seq=seq, latency_ms=latency_ms,
-                          error_kind=err_kind)
-            yield f"data: {json.dumps({'type': 'error', 'error': {'message': f'所有账号/候选模型均不可用（最后错误：{err_kind}）', 'code': 503}}, ensure_ascii=False)}\n\n"
-        finally:
-            db2.close()
+        async for piece in _proxy_loop(
+            key_id=key.id, request=request, chat_body=chat_body, order=order, url=url,
+            use_case="responses", mode_label="resp", initial_model=resolved,
+            upstream_stream=True,
+            make_consumer=make_consumer, emit_client_error=emit_client_error,
+            emit_exhausted=emit_exhausted,
+        ):
+            yield piece
 
     return StreamingResponse(_stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -1143,178 +1157,80 @@ async def anthropic_messages(
     url = f"{settings.BACKEND}/v2/chat/completions"
 
     if not client_wants_stream:
-        db2 = SessionLocal()
-        try:
-            for m in order:
-                body = dict(chat_body)
-                body["model"] = m
-                tried_ids: set = set()
-                for _ in range(3):
-                    acc_i = _select_account(db2, exclude_ids=tried_ids, min_balance=1)
-                    if not acc_i:
-                        break
-                    tried_ids.add(acc_i.id)
-                    sess_i = _account_session_safe(db2, acc_i)
-                    if sess_i is None:
+        # 非流式：内部重试，聚合为 Anthropic Message 对象后一次性返回。
+        # 骨架不对外 yield 任何块，用 async for 驱动后取 out.take()。
+        out = _ProxyOutcome()
+
+        def make_consumer():
+            async def consume(r, att):
+                conv = AnthropicStreamConverter(model=model_name)
+                att.usage_join = "\n"
+                for line in r.text.splitlines():
+                    if not line.strip():
                         continue
-                    headers_i = sess_i.get_headers(extra=_upstream_extra_headers(request))
-                    try:
-                        async with httpx.AsyncClient(timeout=300, limits=backend.HTTP_LIMITS) as client:
-                            r = await client.post(url, headers=headers_i, json=body)
-                            if r.status_code >= 400:
-                                text = r.text[:500]
-                                kind = _classify_error(r.status_code, text)
-                                _apply_account_policy(db2, acc_i, kind, r.status_code, text)
-                                if kind in ("hard_credit", "session_dead", "soft_rate", "not_found", "server"):
-                                    sess_i.close()
-                                    continue
-                                sess_i.close()
-                                return JSONResponse(status_code=r.status_code,
-                                                    content={"error": {"message": text, "type": "upstream_error"}})
-                            conv = AnthropicStreamConverter(model=model_name)
-                            raw_lines: list[str] = []
-                            for line in r.text.splitlines():
-                                if not line.strip():
-                                    continue
-                                raw_lines.append(line)
-                                conv.feed_line(line)
-                            msg_obj = conv.build_message()
-                            cost_info = _parse_usage("\n".join(raw_lines))
-                            acc_i.last_used_at = datetime.utcnow()
-                            acc_i.err_count = 0  # 成功即清零三振计数
-                            db2.commit()
-                            updated = sess_i.updated_json()
-                            total_toks = cost_info["total_tokens"] or cost_info["completion_tokens"]
-                            seq = _log_chat_row(None, None, m, "anthropic", acc_i.uid or "-", 200,
-                                                total_toks, error_kind="success")
-                            sess_i.close()
-                            _record_usage(key.id, acc_i.id, m, cost_info["credits"], updated,
-                                          client_ip=_client_ip(request), use_case="anthropic",
-                                          prompt_tokens=cost_info["prompt_tokens"],
-                                          completion_tokens=cost_info["completion_tokens"],
-                                          total_tokens=cost_info["total_tokens"],
-                                          cached_tokens=cost_info["cached_tokens"],
-                                          seq=seq, error_kind="success")
-                            return JSONResponse(content=msg_obj)
-                    except Exception as e:
-                        kind = _classify_error(0, str(e))
-                        _apply_account_policy(db2, acc_i, kind, 0, str(e))
-                        sess_i.close()
-                        continue
-            seq = _log_chat_row(None, None, resolved, "anthropic", "-", 503, None, error_kind="no_account")
-            _record_usage(key.id, 0, resolved, 0.0, None,
-                          client_ip=_client_ip(request), use_case="anthropic",
-                          seq=seq, error_kind="no_account")
-            return JSONResponse(status_code=503,
-                                content={"error": {"message": "所有账号/候选模型均不可用", "type": "no_model_available"}})
-        finally:
-            db2.close()
+                    att.usage_parts.append(line)
+                    conv.feed_line(line)
+                att.result = conv.build_message()
+                return
+                yield  # pragma: no cover —— 仅为统一骨架的 async generator 接口
+            return consume
+
+        def emit_client_error(status, text):
+            out.response = JSONResponse(status_code=status,
+                                        content={"error": {"message": text, "type": "upstream_error"}})
+
+        def emit_exhausted(_err_kind, _has_err):
+            out.response = JSONResponse(status_code=503,
+                                        content={"error": {"message": "所有账号/候选模型均不可用",
+                                                           "type": "no_model_available"}})
+
+        async for _ in _proxy_loop(
+            key_id=key.id, request=request, chat_body=chat_body, order=order, url=url,
+            use_case="anthropic", mode_label="anthropic", initial_model=resolved,
+            upstream_stream=False, out=out,
+            make_consumer=make_consumer, emit_client_error=emit_client_error,
+            emit_exhausted=emit_exhausted,
+        ):
+            pass
+        return out.take()
+
+    # 协议回调：Anthropic SSE —— Chat 事件经 AnthropicStreamConverter 转换后转发
+    def make_consumer():
+        async def consume(r, att):
+            conv = AnthropicStreamConverter(model=model_name)
+            att.usage_join = "\n"
+            async for line in r.aiter_lines():
+                if not line.strip():
+                    continue
+                att.mark_ttfb()
+                att.usage_parts.append(line)
+                events = conv.feed_line(line)
+                if events:
+                    att.delivered = True
+                    yield events
+            tail = conv.finish()
+            if tail:
+                yield tail
+        return consume
+
+    def emit_client_error(_status, text):
+        # 不可重试的客户端错误才原样透出（error_event 只做事件构造，与流状态无关）
+        return AnthropicStreamConverter(model=model_name).error_event(text)
+
+    def emit_exhausted(err_kind, _has_err):
+        return AnthropicStreamConverter(model=model_name).error_event(
+            f"所有账号/候选模型均不可用（最后错误：{err_kind}）", "overloaded_error"
+        )
 
     async def _stream():
-        db2 = SessionLocal()
-        try:
-            request_start = time.perf_counter()
-            ttfb_at = None
-            seq = None
-            final_model = resolved
-            final_acc_id = 0
-            final_uid = "-"
-            total_toks = None
-            raw_lines: list[str] = []
-            delivered = False
-            last_err_kind = ""
-            last_err_msg = ""
-
-            async with httpx.AsyncClient(timeout=300, limits=backend.HTTP_LIMITS) as client:
-                for m in order:
-                    body = dict(chat_body)
-                    body["model"] = m
-                    tried_ids: set = set()
-                    for _ in range(3):
-                        acc_i = _select_account(db2, exclude_ids=tried_ids, min_balance=1)
-                        if not acc_i:
-                            break
-                        tried_ids.add(acc_i.id)
-                        sess_i = _account_session_safe(db2, acc_i)
-                        if sess_i is None:
-                            continue
-                        headers_i = sess_i.get_headers(extra=_upstream_extra_headers(request))
-                        conv = AnthropicStreamConverter(model=model_name)
-                        try:
-                            async with client.stream("POST", url, headers=headers_i, json=body) as r:
-                                if r.status_code >= 400:
-                                    detail = await r.aread()
-                                    text = detail[:500].decode(errors="ignore") if isinstance(detail, bytes) else str(detail)[:500]
-                                    kind = _classify_error(r.status_code, text)
-                                    _apply_account_policy(db2, acc_i, kind, r.status_code, text)
-                                    if kind in ("hard_credit", "session_dead", "soft_rate", "not_found", "server"):
-                                        last_err_kind = kind
-                                        last_err_msg = text
-                                        sess_i.close()
-                                        continue
-                                    # 不可重试的客户端错误才原样透出
-                                    yield conv.error_event(text)
-                                    sess_i.close()
-                                    return
-                                final_model = m
-                                final_acc_id = acc_i.id
-                                final_uid = acc_i.uid or "-"
-                                acc_i.last_used_at = datetime.utcnow()
-                                acc_i.err_count = 0  # 成功即清零三振计数
-                                db2.commit()
-                                async for line in r.aiter_lines():
-                                    if not line.strip():
-                                        continue
-                                    if ttfb_at is None:
-                                        ttfb_at = time.perf_counter()
-                                    raw_lines.append(line)
-                                    events = conv.feed_line(line)
-                                    if events:
-                                        delivered = True
-                                        yield events
-                            tail = conv.finish()
-                            if tail:
-                                yield tail
-                            text = "\n".join(raw_lines)
-                            usage = _parse_usage(text)
-                            total_toks = usage["total_tokens"] or usage["completion_tokens"]
-                            latency_ms = int((time.perf_counter() - request_start) * 1000)
-                            ttfb_ms = int((ttfb_at - request_start) * 1000) if ttfb_at else None
-                            seq = _log_chat_row(ttfb_ms, latency_ms, final_model, "anthropic", final_uid, 200,
-                                                total_toks, error_kind="success")
-                            updated = sess_i.updated_json()
-                            sess_i.close()
-                            _record_usage(key.id, final_acc_id, final_model, usage["credits"], updated,
-                                          client_ip=_client_ip(request), use_case="anthropic",
-                                          prompt_tokens=usage["prompt_tokens"],
-                                          completion_tokens=usage["completion_tokens"],
-                                          total_tokens=usage["total_tokens"],
-                                          cached_tokens=usage["cached_tokens"],
-                                          seq=seq, ttfb_ms=ttfb_ms, latency_ms=latency_ms,
-                                          error_kind="success")
-                            return
-                        except Exception as e:
-                            if delivered:
-                                sess_i.close()
-                                return
-                            kind = _classify_error(0, str(e))
-                            _apply_account_policy(db2, acc_i, kind, 0, str(e))
-                            if kind == "transport":
-                                last_err_kind = kind
-                                last_err_msg = str(e)
-                            sess_i.close()
-                            continue
-            latency_ms = int((time.perf_counter() - request_start) * 1000)
-            err_kind = last_err_kind or "no_account"
-            seq = _log_chat_row(None, latency_ms, final_model, "anthropic", "-", 503, None, error_kind=err_kind)
-            _record_usage(key.id, 0, final_model, 0.0, None,
-                          client_ip=_client_ip(request), use_case="anthropic",
-                          seq=seq, latency_ms=latency_ms, error_kind=err_kind)
-            yield AnthropicStreamConverter(model=model_name).error_event(
-                f"所有账号/候选模型均不可用（最后错误：{err_kind}）", "overloaded_error"
-            )
-        finally:
-            db2.close()
+        async for piece in _proxy_loop(
+            key_id=key.id, request=request, chat_body=chat_body, order=order, url=url,
+            use_case="anthropic", mode_label="anthropic", initial_model=resolved,
+            upstream_stream=True,
+            make_consumer=make_consumer, emit_client_error=emit_client_error,
+            emit_exhausted=emit_exhausted,
+        ):
+            yield piece
 
     return StreamingResponse(_stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
