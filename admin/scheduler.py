@@ -51,6 +51,28 @@ def _is_adopt_threshold_error(e: Exception) -> bool:
     return _ADOPT_THRESHOLD_MARKER in str(e).lower()
 
 
+def _fmt_travel_eta(st: dict) -> str:
+    """从 travel/status 原始响应估算回程时间（arrive_at / server_now 毫秒时间戳口径）。
+
+    字段缺失或类型不符时返回空串——不猜格式，宁可不显示（与 88lin 实测脚本对齐，
+    server_now 比本地时钟可靠）。
+    """
+    try:
+        arrive = st.get("arrive_at")
+        now = st.get("server_now")
+        if not isinstance(arrive, (int, float)) or not arrive:
+            return ""
+        server = now if isinstance(now, (int, float)) and now else int(time.time() * 1000)
+        hours = (arrive - server) / 3600000.0
+        if hours <= 0:
+            return ",即将到站"
+        if hours >= 1:
+            return f",约{hours:.0f}小时后回"
+        return f",约{int(hours * 60)}分钟后回"
+    except Exception:
+        return ""
+
+
 def _activity_report_count() -> int:
     """每号每次活跃上报的条数（env ADMIN_ACTIVITY_REPORT_COUNT，默认 5）。
 
@@ -213,7 +235,7 @@ def run_cat_travel(db, schedule: "Schedule | None" = None) -> dict:
                                 details.append(f"acc{a.id}:已派出(地点{_TRAVEL_LOCATION_ID},{name})")
                         elif state == "traveling":
                             skipped += 1
-                            details.append(f"acc{a.id}:旅行中({name},record={st.get('record_id') or '-'})")
+                            details.append(f"acc{a.id}:旅行中({name}{_fmt_travel_eta(st)},record={st.get('record_id') or '-'})")
                         else:
                             skipped += 1  # 未知状态
                             details.append(f"acc{a.id}:未知状态{state!r}")
