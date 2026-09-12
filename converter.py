@@ -339,7 +339,7 @@ class CredentialManager:
     # 后端资源查询（模型列表、额度）
     # -----------------------------------------------------------------------
 
-    def _request_backend(self, method: str, path: str, json_body: dict | None = None) -> dict:
+    def _request_backend(self, method: str, path: str, json_body: dict | list | None = None) -> dict:
         """向后端发一个同步请求，返回 {code, msg, requestId, data} 或抛异常。"""
         headers = self.get_headers()
         url = f"{BACKEND}{path}"
@@ -359,7 +359,7 @@ class CredentialManager:
             raise RuntimeError(f"后端请求失败 {method} {path}: HTTP {r.status_code} / {data.get('msg', data)}")
         return data
 
-    def _request_backend_soft(self, method: str, path: str, json_body: dict | None = None) -> dict:
+    def _request_backend_soft(self, method: str, path: str, json_body: dict | list | None = None) -> dict:
         """同 `_request_backend`，但后端返回业务 code!=0 时**不抛异常**，原样返回解析后的 dict。
 
         用于签到领取等场景：领取接口的 1001(已领)/1002(无资格)/1003(活动结束) 等业务码

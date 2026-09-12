@@ -6,14 +6,62 @@
 支持的任务：
   - refresh_balances：遍历 active 账号刷新余额（统计平台总积分）
   - sync_models：从后端拉取最新模型列表并 upsert 倍率
+  - daily_checkin：每日签到领取积分
+  - cat_travel：猫猫旅行巡检（领养 / 派出 / 领奖状态机）
+  - activity_report：对话活跃上报（点亮连登 + 解锁领猫任务）
 """
 import json
+import os
 import threading
 import time
 from datetime import datetime, timedelta
 
 from admin.db import SessionLocal
 from admin.models import Schedule
+
+# ---------------------------------------------------------------------------
+# 猫猫旅行 / 活跃上报的共享风控参数（对齐 Go 版 scheduler 口径）
+# ---------------------------------------------------------------------------
+
+_TRAVEL_LOCATION_ID = 4     # 派出地点固定 4：1~4 收益/时长区间完全相同，无最优解
+_ACCOUNT_DELAY = 0.8        # 账号间限速（秒）：全量账号约 0.8s/个，避免上游风控
+_REPORT_GAP = 1.5           # 同一账号连续上报之间的间隔（秒）：秒发易触发风控
+_ADOPT_THRESHOLD_MARKER = "first_buddy task not completed yet"
+
+# 领养门槛未达的当日防抖：uid → 上游自然日（CST）。同日不再重试领养，
+# 避免对上游重试轰炸；进程重启即清零（与 Go 版一致，无需持久化）。
+_adopt_tried: dict[str, str] = {}
+
+
+def _upstream_today() -> str:
+    """上游自然日（00:00 CST 重置）格式 YYYY-MM-DD。"""
+    return (datetime.utcnow() + timedelta(hours=8)).strftime("%Y-%m-%d")
+
+
+def _adopt_tried_today(uid: str) -> bool:
+    return _adopt_tried.get(uid) == _upstream_today()
+
+
+def _mark_adopt_tried(uid: str) -> None:
+    _adopt_tried[uid] = _upstream_today()
+
+
+def _is_adopt_threshold_error(e: Exception) -> bool:
+    """领养对话量门槛未达标：上游 HTTP 400 + 固定关键词，属预期行为。"""
+    return _ADOPT_THRESHOLD_MARKER in str(e).lower()
+
+
+def _activity_report_count() -> int:
+    """每号每次活跃上报的条数（env ADMIN_ACTIVITY_REPORT_COUNT，默认 5）。
+
+    领养猫（buddy/first）前置需 5 次对话（chat_5 任务），默认 5 条同一
+    conversationId 内多轮上报刚好刷满门槛；配置 <=0 时回落 1。
+    """
+    try:
+        n = int(os.getenv("ADMIN_ACTIVITY_REPORT_COUNT", "5"))
+    except (TypeError, ValueError):
+        n = 5
+    return n if n > 0 else 1
 
 
 def run_task(task: str, db, schedule: "Schedule | None" = None) -> dict:
@@ -34,6 +82,10 @@ def run_task(task: str, db, schedule: "Schedule | None" = None) -> dict:
         return models_router._do_sync_models(db)
     if task == "daily_checkin":
         return run_daily_checkin(db, schedule)
+    if task == "cat_travel":
+        return run_cat_travel(db, schedule)
+    if task == "activity_report":
+        return run_activity_report(db, schedule)
     return {"task": task, "error": "未知任务类型"}
 
 
@@ -98,6 +150,132 @@ def run_daily_checkin(db, schedule: "Schedule | None" = None) -> dict:
     }
 
 
+def run_cat_travel(db, schedule: "Schedule | None" = None) -> dict:
+    """猫猫旅行巡检：每个活跃账号单趟推进一个动作（对齐 Go 版 travelOne 状态机）。
+
+    无猫 → 同意协议 + 尝试领养（+300 积分；对话量门槛未达时上游 400，
+           当日不再重试，避免对上游重试轰炸）。
+    有猫 → 按 travel/status 分派：
+           arrived   → claim 领奖（必须带 record_id）
+           idle      → 未达当日名额时 depart 派出（location_id 固定 4）
+           traveling → 跳过（在途）
+
+    风控要点：账号间 sleep 0.8s；单号单动作不轮询不等待；查询失败只跳过该号。
+    """
+    from admin.models import Account
+    from admin import backend as be
+
+    departed = claimed = adopted = skipped = failed = 0
+    errors: list[str] = []
+    for a in db.query(Account).filter(Account.status == "active").all():
+        try:
+            with be.AccountSession(a.auth_json) as sess:
+                try:
+                    buddy = sess.buddy_info()
+                    if buddy is None:
+                        if _adopt_tried_today(a.uid or ""):
+                            skipped += 1  # 当日已判定门槛未达，不再重试
+                        else:
+                            sess.buddy_agreement()  # 幂等
+                            try:
+                                sess.buddy_first()
+                                adopted += 1
+                            except Exception as e:
+                                if _is_adopt_threshold_error(e):
+                                    _mark_adopt_tried(a.uid or "")
+                                    skipped += 1
+                                else:
+                                    raise
+                    else:
+                        st = sess.travel_status()
+                        state = st.get("state")
+                        if state == "arrived":
+                            rid = int(st.get("record_id") or 0)
+                            if rid:
+                                sess.travel_claim(rid)
+                                claimed += 1
+                            else:
+                                skipped += 1  # arrived 但无 record_id，无法领奖
+                        elif state == "idle":
+                            if st.get("daily_limit_reached"):
+                                skipped += 1  # 服务端明确名额已用完，不白撞
+                            else:
+                                sess.travel_depart(_TRAVEL_LOCATION_ID)
+                                departed += 1
+                        else:
+                            skipped += 1  # traveling / 未知状态
+                finally:
+                    # 无论中途是否失败，把可能已刷新的 token 写回
+                    a.auth_json = sess.updated_json()
+        except Exception as e:
+            failed += 1
+            errors.append(f"acc{a.id}:{e}")
+        time.sleep(_ACCOUNT_DELAY)
+    db.commit()
+    return {"task": "cat_travel", "departed": departed, "claimed": claimed,
+            "adopted": adopted, "skipped": skipped, "failed": failed,
+            "errors": errors[:10]}
+
+
+def run_activity_report(db, schedule: "Schedule | None" = None) -> dict:
+    """对话活跃上报：点亮 growth 连登 + 解锁领猫任务（first_buddy 的 chat_5 门槛）。
+
+    每号上报 N 条（默认 5，env ADMIN_ACTIVITY_REPORT_COUNT）共用同一
+    conversationId（模拟同一会话内 N 轮对话），条间 1.5s，requestId 各条独立。
+    发满后回读 streak 自检（days==0 说明上报被上游静默丢弃，通常= userId 缺失）；
+    无猫账号发满后立即重试领养（对话量刚补满的新状态，豁免当日防抖）。
+
+    风控口径：每号每天 1 轮（调度间隔 24h），不做多时点高频上报。
+    """
+    from admin.models import Account
+    from admin import backend as be
+
+    count = _activity_report_count()
+    reported = failed = 0
+    streak_warns: list[str] = []
+    errors: list[str] = []
+    for a in db.query(Account).filter(Account.status == "active").all():
+        try:
+            with be.AccountSession(a.auth_json) as sess:
+                ok = 0
+                try:
+                    cid = f"wb2api-{int(time.time() * 1000)}"
+                    for i in range(1, count + 1):
+                        sess.report_chat_activity(cid, f"{cid}-r{i}")
+                        ok += 1
+                        if i < count:
+                            time.sleep(_REPORT_GAP)
+                finally:
+                    a.auth_json = sess.updated_json()  # token 始终写回
+                if ok < count:
+                    errors.append(f"acc{a.id}:上报中断({ok}/{count})")
+                    continue  # 未发满：streak 自检与补领养均无意义
+                reported += 1
+                # streak 自检（只读 oracle，失败不影响主流程）
+                try:
+                    if sess.growth_streak_days() == 0:
+                        streak_warns.append(f"acc{a.id}")  # 上报 OK 但连登为 0
+                except Exception:
+                    streak_warns.append(f"acc{a.id}")
+                # 无猫账号：对话量刚补满 → 立即重试领养（豁免当日防抖）
+                if sess.buddy_info() is None:
+                    sess.buddy_agreement()
+                    try:
+                        sess.buddy_first()
+                    except Exception as e:
+                        if _is_adopt_threshold_error(e):
+                            _mark_adopt_tried(a.uid or "")
+                        # 其他领养错误静默：上报已成功，不影响本轮结果
+        except Exception as e:
+            failed += 1
+            errors.append(f"acc{a.id}:{e}")
+        time.sleep(_ACCOUNT_DELAY)
+    db.commit()
+    return {"task": "activity_report", "reported": reported, "failed": failed,
+            "count_per_account": count, "streak_warn": streak_warns,
+            "errors": errors[:10]}
+
+
 def _run_one(s: Schedule, db, now: datetime):
     try:
         result = run_task(s.task, db, s)
@@ -127,7 +305,7 @@ def _loop():
 
 
 def seed_defaults(db):
-    """首次启动若无任何任务则写入默认任务（含每日签到）。"""
+    """首次启动若无任何任务则写入默认任务（含每日签到 / 猫猫旅行 / 活跃上报）。"""
     if db.query(Schedule).count() == 0:
         now = datetime.utcnow()
         db.add(Schedule(name="整点刷新平台总积分", task="refresh_balances",
@@ -135,6 +313,10 @@ def seed_defaults(db):
         db.add(Schedule(name="每日同步模型列表", task="sync_models",
                         interval_minutes=1440, enabled=1, next_run_at=now))
         db.add(Schedule(name="每日签到领取积分", task="daily_checkin",
+                        interval_minutes=1440, enabled=1, next_run_at=now))
+        db.add(Schedule(name="猫猫旅行巡检", task="cat_travel",
+                        interval_minutes=1440, enabled=1, next_run_at=now))
+        db.add(Schedule(name="对话活跃上报", task="activity_report",
                         interval_minutes=1440, enabled=1, next_run_at=now))
         db.commit()
 
@@ -152,12 +334,29 @@ def ensure_daily_checkin(db):
         db.commit()
 
 
+def ensure_growth_tasks(db):
+    """老实例缺猫猫旅行 / 活跃上报任务时幂等补充（与 ensure_daily_checkin 同理）。"""
+    added = False
+    now = datetime.utcnow()
+    if db.query(Schedule).filter(Schedule.task == "cat_travel").count() == 0:
+        db.add(Schedule(name="猫猫旅行巡检", task="cat_travel",
+                        interval_minutes=1440, enabled=1, next_run_at=now))
+        added = True
+    if db.query(Schedule).filter(Schedule.task == "activity_report").count() == 0:
+        db.add(Schedule(name="对话活跃上报", task="activity_report",
+                        interval_minutes=1440, enabled=1, next_run_at=now))
+        added = True
+    if added:
+        db.commit()
+
+
 def start_scheduler():
     """在 FastAPI 启动时调用：播种默认任务并拉起守护线程。"""
     try:
         db = SessionLocal()
         seed_defaults(db)
         ensure_daily_checkin(db)
+        ensure_growth_tasks(db)
         db.close()
     except Exception:
         pass

@@ -1334,6 +1334,17 @@ function scheduleResultSummary(s){
     parts.push(`新增 ${obj.added||0}`);
     parts.push(`更新 ${obj.updated||0}`);
     parts.push(`共 ${obj.total_in_db||0}`);
+  } else if(s.task === "cat_travel"){
+    parts.push(`派出 ${obj.departed||0}`);
+    parts.push(`领奖 ${obj.claimed||0}`);
+    parts.push(`领养 ${obj.adopted||0}`);
+    if(obj.skipped) parts.push(`跳过 ${obj.skipped}`);
+    if(obj.failed) parts.push(`失败 ${obj.failed}`);
+  } else if(s.task === "activity_report"){
+    parts.push(`已上报 ${obj.reported||0}`);
+    parts.push(`每号 ${obj.count_per_account||1} 条`);
+    if(obj.failed) parts.push(`失败 ${obj.failed}`);
+    if(obj.streak_warn && obj.streak_warn.length) parts.push(`连登可疑 ${obj.streak_warn.length}`);
   } else {
     parts.push(esc(raw.slice(0,120)));
   }
@@ -1376,7 +1387,7 @@ async function toggleSchedule(id){ await api("/api/schedules/"+id+"/toggle",{met
 async function delSchedule(id){ if(!confirm("确认删除该任务？"))return; const r=await api("/api/schedules/"+id,{method:"DELETE"}); toast(r.ok?"已删除":"失败",r.ok?"ok":"err"); if(r.ok) loadSchedules(); }
 function scheduleForm(title, data){
   data = data || {};
-  const tasks = [["refresh_balances","刷新平台总积分"],["sync_models","同步模型列表"],["daily_checkin","每日签到领取积分"]];
+  const tasks = [["refresh_balances","刷新平台总积分"],["sync_models","同步模型列表"],["daily_checkin","每日签到领取积分"],["cat_travel","猫猫旅行巡检"],["activity_report","对话活跃上报"]];
   const opts = tasks.map(t=>`<option value="${t[0]}" ${data.task===t[0]?'selected':''}>${t[1]}</option>`).join("");
   const saVal = (data.stop_after||"").slice(0,16); // 适配 <input type="datetime-local">
   const isCheckin = data.task==="daily_checkin";

@@ -6,6 +6,7 @@
 import json
 import os
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +16,9 @@ from converter import CredentialManager  # 复用既有后端鉴权 / 刷新 / �
 
 # 连接池：减少 TLS 握手，与 Go 项目 MaxIdleConnsPerHost=20 对齐。
 HTTP_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20)
+
+# growth 域路径前缀（猫猫旅行 / 连登 / 领养），实际完整路径带 /v2 前缀。
+_GROWTH_BASE = "/v2/activity/growth"
 
 
 def parse_auth_meta(auth_json: str) -> dict:
@@ -139,6 +143,107 @@ class AccountSession:
         """返回 token 到期时间戳（毫秒），0 表示未知。"""
         auth = self.cm._auth or {}
         return auth.get("expiresAt") or 0
+
+    # -----------------------------------------------------------------------
+    # 成长中心：猫猫旅行 / 连登 / 活跃上报
+    # 请求契约对齐 Go 版实现（Sliverkiss/workbuddy2api internal/upstream/travel.go、
+    # report.go）与 88lin/workbuddy-auto-signin 实测口径；字段勿凭猜测增删。
+    # -----------------------------------------------------------------------
+
+    def _growth(self, method: str, path: str, body: dict | None = None) -> dict:
+        """growth 域请求，返回 data 字段；业务失败由 _request_backend 抛异常。"""
+        resp = self.cm._request_backend(method, _GROWTH_BASE + path, body)
+        return resp.get("data") or {}
+
+    def buddy_info(self) -> dict | None:
+        """当前猫档案；None = 无猫（data.buddy 为 null / 缺失 / 空对象）。"""
+        b = self._growth("GET", "/buddy/info").get("buddy")
+        return b or None
+
+    def buddy_agreement(self) -> None:
+        """同意活动协议（幂等，重复调用无副作用）。"""
+        self._growth("POST", "/buddy/agreement", {"agree": True})
+
+    def buddy_first(self) -> dict:
+        """领养第一只猫（送 300 积分）。
+
+        对话量门槛未达标时上游返回 HTTP 400（消息含
+        "first_buddy task not completed yet"），_request_backend 抛 RuntimeError，
+        由调用方识别后做当日防抖（当日不再重试）。
+        """
+        return self._growth("POST", "/buddy/first", {})
+
+    def travel_status(self) -> dict:
+        """旅行状态：state(idle/traveling/arrived) / daily_limit_reached / record_id / reward_credit。
+
+        daily_limit_reached = 今日已派出（上游自然日 00:00 CST 重置）。
+        """
+        return self._growth("GET", "/buddy/travel/status")
+
+    def travel_depart(self, location_id: int = 4) -> None:
+        """派出猫旅行。location_id 1~4 实测收益/时长区间完全相同（Go 版固定 4）。"""
+        self._growth("POST", "/buddy/travel/depart", {"location_id": location_id})
+
+    def travel_claim(self, record_id: int) -> int:
+        """领取到站奖励（必须带 record_id），返回 reward_credit；缺失按 0 记，不算失败。"""
+        data = self._growth("POST", "/buddy/travel/claim", {"record_id": record_id})
+        return int(data.get("reward_credit") or 0)
+
+    def growth_streak_days(self) -> int:
+        """连登天数（data.streak.days）；缺字段返回 0（活跃上报被静默丢弃的告警信号）。"""
+        streak = self._growth("GET", "/streak").get("streak") or {}
+        return int(streak.get("days") or 0)
+
+    def report_chat_activity(self, conversation_id: str, request_id: str = "") -> None:
+        """POST /v2/report 上报一条 chat_request_send 活跃事件（body 为数组）。
+
+        - userId 必填（= 账号 uid）：缺失时上游返回 200 但**静默丢弃**
+          （progress 不动、streak 不计）。
+        - conversationId 无需真实会话，服务端不校验一致性；requestId 各条独立。
+        - 字段形状照抄官方客户端全量字段，勿裁剪成最小集（防上游后续加严）。
+        - 一条上报同时点亮 growth 连登 + 解锁 first_buddy 领养任务。
+        """
+        acct = (self.cm._session().get("account") or {})
+        now_ms = int(time.time() * 1000)
+        ev = {
+            "eventCode": "chat_request_send",
+            "timestamp": now_ms,
+            "reportDelay": 0,
+            "mode": "craft",
+            "conversationId": conversation_id,
+            "requestId": request_id or conversation_id,
+            "inputLength": 12,
+            "requestModelId": "deepseek-v4-flash",
+            "requestModelName": "DeepSeek V4 Flash",
+            "isPlan": False,
+            "isAutoExecuteTerminal": False,
+            "isAutoModify": False,
+            "codebaseEnable": False,
+            "maxToken": 0,
+            "maxSteps": 0,
+            "temperature": 0,
+            "maxRetries": 0,
+            "mentionContexts": [],
+            "knowledgeId": [],
+            "knowledgeName": [],
+            "codebaseId": "",
+            "mentionContextCount": 0,
+            "command": "",
+            "expertId": "",
+            "recommendId": "",
+            "skillId": "",
+            "skillCount": 0,
+            "totalCount": 0,
+            "fileUri": "",
+            "presentAt": now_ms,
+            "traceId": "",
+            "rootRequestId": conversation_id,
+            "parentConversationId": conversation_id,
+            "agentName": "default",
+            "agentType": "conversation",
+            "userId": acct.get("uid", ""),
+        }
+        self.cm._request_backend("POST", "/v2/report", [ev])
 
     def updated_json(self) -> str:
         with open(self._path, "r", encoding="utf-8") as f:

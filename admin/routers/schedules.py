@@ -13,11 +13,13 @@ from admin.security import require_admin
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
 
-TASK_CHOICES = ["refresh_balances", "sync_models", "daily_checkin"]
+TASK_CHOICES = ["refresh_balances", "sync_models", "daily_checkin", "cat_travel", "activity_report"]
 TASK_LABELS = {
     "refresh_balances": "刷新平台总积分",
     "sync_models": "同步模型列表",
     "daily_checkin": "每日签到领取积分",
+    "cat_travel": "猫猫旅行巡检",
+    "activity_report": "对话活跃上报",
 }
 
 
