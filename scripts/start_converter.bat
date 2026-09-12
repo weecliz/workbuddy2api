@@ -47,13 +47,13 @@ rem ---------- 1. locate python ----------
 set "PY="
 if defined CONVERTER_PYTHON set "PY=%CONVERTER_PYTHON%"
 
+if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY set "PY=%%W"
+
 if not defined PY for %%P in (
-    "%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
     "%~dp0..\.venv\Scripts\python.exe"
     "%~dp0..\venv\Scripts\python.exe"
+    "%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
 ) do if not defined PY if exist %%P set "PY=%%~P"
-
-if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY set "PY=%%W"
 
 if not defined PY (
     echo [ERROR] No usable Python interpreter found.
