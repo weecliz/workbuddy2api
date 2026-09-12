@@ -159,6 +159,7 @@ def _record_usage(key_id: int, account_id: int, model: str, credits: float | Non
             if acc is not None:
                 acc.balance_remain = max(0, int(acc.balance_remain or 0) - int(credits))
                 acc.last_used_at = datetime.utcnow()
+                acc.err_count = 0  # 成功即清零三振计数
                 if updated_auth_json:
                     acc.auth_json = updated_auth_json
             log = UsageLog(
@@ -282,6 +283,7 @@ _HARD_CREDIT_MARKERS = [
     "积分不足", "额度不足", "余额不足", "积分用完", "额度用尽", "没有积分",
 ]
 _SESSION_DEAD_MARKERS = ["Offline user session not found", "12153", "session not found", "invalid session"]
+_SESSION_DEAD_THRESHOLD = 3  # 三振机制：session_dead 连续命中达到该次数才禁用
 
 
 def _classify_error(status: int, body: str) -> str:
@@ -327,10 +329,19 @@ def _apply_account_policy(db: Session, acc: Account, kind: str, status: int, msg
         acc.last_err_at = now
         acc.last_err_msg = (msg or "429 rate limit")[:255]
     elif kind == "session_dead":
-        acc.status = "disabled"
-        acc.cool_kind = "session_dead"
+        # 三振机制：连续命中死亡标记达到 _SESSION_DEAD_THRESHOLD 才禁用；
+        # 未达阈值先 10 分钟冷却观察。成功请求会把 err_count 清零，
+        # 因此这里实际统计的是「连续失败次数」（与 Go 版语义对齐）。
+        acc.err_count = (acc.err_count or 0) + 1
         acc.last_err_at = now
         acc.last_err_msg = (msg or "session dead")[:255]
+        if acc.err_count >= _SESSION_DEAD_THRESHOLD:
+            acc.status = "disabled"
+            acc.cool_kind = "session_dead"
+            acc.err_count = 0
+        else:
+            acc.cool_until = now + timedelta(minutes=10)
+            acc.cool_kind = "session_dead"
     elif kind == "not_found":
         # 404 短冷却不累计 errCount（防雪崩）
         acc.cool_until = now + timedelta(seconds=60)
@@ -373,7 +384,12 @@ def _account_session_safe(db: Session, acc: Account) -> backend.AccountSession |
         msg = str(e)
         kind = _classify_error(0, msg)
         if kind == "transport":
-            kind = "session_dead"  # token 刷新失败通常等于 session 失效
+            # 纯网络层失败（连不上上游 / 超时）不等于 session 死亡：
+            # 走 server 类累计（5 次触发 10 分钟冷却），永远不会禁用。
+            # 真正的 session 死亡会在异常消息里携带上游标记
+            # （如 "Offline user session not found" / 12153），
+            # 由 _classify_error 直接归为 session_dead 计入三振。
+            kind = "server"
         _apply_account_policy(db, acc, kind, 0, msg)
         try:
             sess.close()
@@ -746,6 +762,7 @@ async def chat_completions(
                                 final_acc_id = acc_i.id
                                 final_uid = acc_i.uid or "-"
                                 acc_i.last_used_at = datetime.utcnow()
+                                acc_i.err_count = 0  # 成功即清零三振计数
                                 db2.commit()
                                 async for chunk in r.aiter_text():
                                     if ttfb_at is None:
@@ -909,6 +926,7 @@ async def responses_proxy(
                             obj = converter.get_nonstream_response()
                             cost_info = _parse_usage(r.text)
                             acc_i.last_used_at = datetime.utcnow()
+                            acc_i.err_count = 0  # 成功即清零三振计数
                             db2.commit()
                             updated = sess_i.updated_json()
                             total_toks = cost_info["total_tokens"] or cost_info["completion_tokens"]
@@ -984,6 +1002,7 @@ async def responses_proxy(
                                 final_acc_id = acc_i.id
                                 final_uid = acc_i.uid or "-"
                                 acc_i.last_used_at = datetime.utcnow()
+                                acc_i.err_count = 0  # 成功即清零三振计数
                                 db2.commit()
                                 async for line in r.aiter_lines():
                                     if not line.strip():
@@ -1162,6 +1181,7 @@ async def anthropic_messages(
                             msg_obj = conv.build_message()
                             cost_info = _parse_usage("\n".join(raw_lines))
                             acc_i.last_used_at = datetime.utcnow()
+                            acc_i.err_count = 0  # 成功即清零三振计数
                             db2.commit()
                             updated = sess_i.updated_json()
                             total_toks = cost_info["total_tokens"] or cost_info["completion_tokens"]
@@ -1240,6 +1260,7 @@ async def anthropic_messages(
                                 final_acc_id = acc_i.id
                                 final_uid = acc_i.uid or "-"
                                 acc_i.last_used_at = datetime.utcnow()
+                                acc_i.err_count = 0  # 成功即清零三振计数
                                 db2.commit()
                                 async for line in r.aiter_lines():
                                     if not line.strip():
@@ -1361,6 +1382,7 @@ async def models(
             models_raw = sess.fetch_models()
             acc.auth_json = sess.updated_json()
         acc.last_used_at = datetime.utcnow()
+        acc.err_count = 0  # 成功即清零三振计数
         db.commit()
         data = [{
             "id": m.get("id"),

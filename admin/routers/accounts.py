@@ -69,6 +69,7 @@ def _refresh_balance(acc: Account) -> bool:
             acc.balance_remain = int(bal.get("remain", 0) or 0)
             acc.auth_json = sess.updated_json()  # 回写可能刷新的 token
         acc.last_sync_at = datetime.utcnow()
+        acc.err_count = 0  # 余额拉取成功 = 会话存活，清零三振计数
         return True
     except Exception:
         return False
@@ -335,6 +336,11 @@ def patch_account(
         acc.name = body["name"]
     if "status" in body and body["status"] in ("active", "disabled"):
         acc.status = body["status"]
+        if body["status"] == "active":
+            # 手动重新启用：清空三振计数与冷却，给账号一个干净的重开状态
+            acc.err_count = 0
+            acc.cool_until = None
+            acc.cool_kind = ""
     db.commit()
     return {"id": acc.id, "ok": True}
 
