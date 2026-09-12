@@ -2,9 +2,9 @@
 # CodeBuddy/WorkBuddy 订阅 -> OpenAI 兼容客户端 —— provider 配置示例（片段）
 # ------------------------------------------------------------
 # 前提：转换器已在本地运行（见 README.md）
-#   uv run converter.py --port 8787
-# 或：
-#   python3 converter.py --port 8787
+#   python3 -m core.converter --port 8787
+# 或（uv 环境）：
+#   uv run python -m core.converter --port 8787
 #
 # ⚠️ 本文件只是「示例」。若你的客户端需要合并配置，请【手动】把下面的段落
 #    复制/合并进你自己的配置文件。本脚本绝不自动改写任何已有配置。
@@ -47,9 +47,9 @@ model_provider = "workbuddy"
 # 转换器已内置 Anthropic 适配层，可通过 CC Switch 接入。
 #
 # 启动转换器（强烈建议开启脱敏，避免后端审核拦截）：
-#   uv run converter.py --desensitize
+#   python3 -m core.converter --desensitize
 # 若需保留 Claude Code 完整 system prompt（不压缩），加 --no-compact：
-#   uv run converter.py --desensitize --no-compact
+#   python3 -m core.converter --desensitize --no-compact
 #
 # 通过 CC Switch 配置模型提供商，指向 Anthropic 端点：
 #   base_url : http://127.0.0.1:8787/v1/messages

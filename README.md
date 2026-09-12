@@ -670,6 +670,8 @@ workbuddy2api/
 │   ├── Dockerfile.admin      # admin 独立版（8790，Sealos / 容器平台）
 │   └── docker-compose.yml
 ├── docs/                     # 部署文档：DEPLOY_WINDOWS / DEPLOY_SEALOS / ENV_SETUP
+├── examples/                 # 客户端接入示例（手动合并进自己的配置，脚本不自动改写）
+│   └── codex-codebuddy.example.toml  # Codex CLI / Claude Code / 其它客户端接入片段
 ├── scripts/                  # 本机一键脚本：start_admin / start_converter / 服务安装卸载
 ├── tests/                    # pytest：代理重试骨架 + 猫猫旅行状态机
 └── README.md
