@@ -34,10 +34,17 @@ def parse_auth_meta(auth_json: str) -> dict:
 
 
 class AccountSession:
-    """把一个账号的 auth_json 包成可用的后端会话。"""
+    """把一个账号的 auth_json 包成可用的后端会话。
+
+    出站身份（UA / X-Device-Token 策略）由凭据的 auth.domain 在
+    CredentialManager 内自动推断，无需外部指定。
+    """
 
     def __init__(self, auth_json: str):
-        self._path = tempfile.mktemp(suffix=".info")
+        # 用 mkstemp 而不是 mktemp：后者在「取名字」与「写入」之间有 TOCTOU 窗口。
+        # mkstemp 会返回已打开的 fd，这里立刻关掉（路径已经安全创建好了）。
+        _fd, self._path = tempfile.mkstemp(suffix=".info")
+        os.close(_fd)
         with open(self._path, "w", encoding="utf-8") as f:
             f.write(auth_json)
         self.cm = CredentialManager(Path(self._path))

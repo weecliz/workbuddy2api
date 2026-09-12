@@ -99,6 +99,68 @@ BACKEND = "https://copilot.tencent.com"
 DEFAULT_DOMAIN = "www.codebuddy.cn"
 USER_AGENT = "codebuddy2openai/2.0"
 
+# ⚠️ 上面这个常量是历史遗留：改动前所有账号的出站 UA 都是它。
+#    现在 UA 由客户端身份画像决定（见下），该常量**已不再用于出站请求**，
+#    仅为兼容可能的外部引用而保留。
+#    想恢复旧行为可设 ADMIN_UA_WORKBUDDY=codebuddy2openai/2.0。
+
+# ---------------------------------------------------------------------------
+# 客户端身份画像（按 auth.domain 现算，无状态、不落库）
+#
+# 官方两个客户端（WorkBuddy 桌面端 / CodeBuddy CLI）在服务端看来是**同一套客户端**：
+# 各自 product.json 里 platform 都是 "CLI"、deploymentType 都是 "SaaS"（即 X-Product）、
+# authentication.attributes.prefixPath 都是 "/plugin"，refresh 都用
+# X-Auth-Refresh-Source: plugin。端点与请求头结构完全一致。
+#
+# 唯一会体现在出站请求里的实质差异是 **User-Agent 里的 productName**：
+#     WorkBuddy 桌面端 -> "CLI/<ver> WorkBuddy/<ver>"
+#     CodeBuddy CLI   -> "CLI/<ver> CodeBuddy/<ver>"
+# 次要差异：桌面端会给「模型 / 签到」请求带 X-Device-Token，CLI 官方不带。
+#
+# 身份来源：凭据自身的 auth.domain（实测 WorkBuddy 桌面端是 www.workbuddy.cn，
+# CodeBuddy CLI 是 copilot.tencent.com）。每次出站时由 `_build_headers_from`
+# 现算，无需任何外部存储。domain 缺失时回落全局默认
+# ADMIN_UPSTREAM_CLIENT_KIND（默认 workbuddy）。
+#
+# 版本号可信度：
+#   - codebuddy 的值是**本机实测**（取自 ~/.codebuddy/logs 里的真实请求头）。
+#   - workbuddy 的值按官方 UA 拼装规则（platform/productName 拼装）与其 product.json
+#     **推断**得出；桌面端不打印 API 请求头，无法从日志确认版本号，故以应用版本
+#     5.3.14 作默认值。客户端升级后请同步调整这两个环境变量。
+# ---------------------------------------------------------------------------
+CLIENT_KINDS = ("workbuddy", "codebuddy")
+
+_KIND_UA = {
+    "workbuddy": os.getenv("ADMIN_UA_WORKBUDDY", "CLI/5.3.14 WorkBuddy/5.3.14"),
+    "codebuddy": os.getenv("ADMIN_UA_CODECLI", "CLI/2.148.0 CodeBuddy/2.148.0"),
+}
+
+
+def client_kind_from_domain(domain: str | None) -> str:
+    """按凭据里的 auth.domain 推断客户端身份（无状态，出站时现算）。
+
+    domain 含 "workbuddy" -> workbuddy；其他非空 -> codebuddy；
+    空 / 缺失 -> 回落全局默认 ADMIN_UPSTREAM_CLIENT_KIND（默认 workbuddy）。
+
+    ⚠️ 回落默认与历史行为不同：改动前所有账号的 UA 都是自造的
+    `codebuddy2openai/2.0`，现在会拿到真实客户端 UA。这是有意的修正 ——
+    自造名本身就是画像不自洽的风险点。想完全恢复旧行为，
+    设 `ADMIN_UA_WORKBUDDY=codebuddy2openai/2.0`。
+    """
+    d = (domain or "").strip().lower()
+    if "workbuddy" in d:
+        return "workbuddy"
+    if d:
+        return "codebuddy"
+    default = (os.getenv("ADMIN_UPSTREAM_CLIENT_KIND") or "workbuddy").strip().lower()
+    return default if default in _KIND_UA else "workbuddy"
+
+
+def client_kind_ua(kind: str | None) -> str:
+    """取该客户端身份对应的 User-Agent。"""
+    k = (kind or "").strip().lower()
+    return _KIND_UA.get(k) or _KIND_UA["workbuddy"]
+
 # ---------------------------------------------------------------------------
 # 平台相关：定位 auth 目录
 # ---------------------------------------------------------------------------
@@ -150,7 +212,11 @@ def _get_turing_device_token() -> str | None:
 
 
 class CredentialManager:
-    """从 auth 文件读取凭据；token 临近过期时自动刷新并回写。"""
+    """从 auth 文件读取凭据；token 临近过期时自动刷新并回写。
+
+    出站身份（UA / X-Device-Token 策略）在 `_build_headers_from` 内按凭据的
+    auth.domain 现算，无需外部指定。
+    """
 
     def __init__(self, path: Path):
         self.path = path
@@ -220,6 +286,7 @@ class CredentialManager:
 
     def _build_headers_from(self, auth: dict, account: dict) -> dict:
         domain = auth.get("domain") or DEFAULT_DOMAIN
+        kind = client_kind_from_domain(auth.get("domain"))
         h = {
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -228,13 +295,15 @@ class CredentialManager:
             "X-Enterprise-Id": account.get("enterpriseId", ""),
             "X-Tenant-Id": account.get("enterpriseId", ""),
             "X-Domain": domain,
-            "User-Agent": USER_AGENT,
+            "User-Agent": client_kind_ua(kind),
         }
-        # 风控设备头：与桌面端 Turing Shield 一致，缺失会被上游识别为异常客户端。
-        # 取不到（桌面端未安装 / SDK 不支持）时优雅降级为不带该头，不影响主流程。
-        tok = _get_turing_device_token()
-        if tok:
-            h["X-Device-Token"] = tok
+        # 风控设备头：官方桌面端只给「模型 / 签到」请求带该头，CodeBuddy CLI 官方不带。
+        # 因此仅 workbuddy 身份尝试注入；取不到（桌面端未安装 / SDK 不支持 / 云端 Linux）
+        # 时优雅降级为不带该头，不影响主流程。
+        if kind == "workbuddy":
+            tok = _get_turing_device_token()
+            if tok:
+                h["X-Device-Token"] = tok
         return h
 
     def get_headers(self, extra: dict | None = None) -> dict:

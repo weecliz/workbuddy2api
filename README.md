@@ -208,6 +208,8 @@ WORKBUDDY_VERSION              # 默认 2.0.0
 | 登录 | `POST /api/login` | 返回 JWT（放 `X-Admin-Token`） |
 | 账号 | `GET/POST /api/accounts` · `POST /api/accounts/batch` | 账号列表 + 汇总 / 新增单个 / 批量导入 |
 | 账号 | `POST /api/accounts/{id}/refresh` · `PATCH/DELETE /api/accounts/{id}` | 刷新余额 / 改状态 / 删除 |
+| 账号 | `GET /api/accounts/scan-local` · `POST /api/accounts/import-local` · `POST /api/accounts/{id}/inject` | 扫描本机登录态 / 导入号池 / 注入回本机 |
+| 账号 | `POST /api/oauth/start` · `GET /api/oauth/status/{login_id}` · `POST /api/oauth/commit/{login_id}` | **OAuth 一键加号**（不需要桌面端，见 [3.6](#36-oauth-一键加号不需要桌面端)） |
 | Key | `GET/POST /api/keys` · `PATCH/DELETE /api/keys/{id}` | Key 列表（脱敏）/ 创建 / 改限额 / 停用 / 吊销 |
 | 任务 | `GET/POST /api/schedules` · `PATCH/DELETE /api/schedules/{id}` · `POST /api/schedules/{id}/run` | 定时任务 CRUD / 立即运行 |
 | 用量 | `GET /api/usage` · `GET /api/logs/usage` | 用量汇总 / 明细 |
@@ -224,6 +226,9 @@ WORKBUDDY_VERSION              # 默认 2.0.0
 ### 3.4 环境变量（admin）
 
 `ADMIN_DATABASE_URL` · `ADMIN_REDIS_URL` · `ADMIN_BACKEND` · `ADMIN_USERNAME` · `ADMIN_PASSWORD` · `ADMIN_JWT_SECRET`（≥32 字节）· `ADMIN_JWT_EXPIRE_HOURS` · `ADMIN_COST_PER_TOKEN` · `ADMIN_ACCOUNT_SELECT`（`remain` / `lru`）· `ADMIN_PORT` · `ADMIN_CLIENT_AUTH_DIR`
+
+OAuth 一键加号相关（`ADMIN_OAUTH_*`，均可省略）见 [3.6](#36-oauth-一键加号不需要桌面端)。
+客户端身份画像相关（`ADMIN_UPSTREAM_CLIENT_KIND` / `ADMIN_UA_*`）见 [3.7](#37-客户端身份画像workbuddy--codebuddy)。
 
 Anthropic 端点（`/v1/messages`）相关：
 
@@ -246,6 +251,137 @@ Anthropic 端点（`/v1/messages`）相关：
 - 后端未回传 `credits` 时，按 `completion_tokens × COST_PER_TOKEN` 估算扣费（经验值）
 - 配额扣减在流式结束后的 `finally` 里提交，高并发下非严格原子（极端竞态可能短暂超额）
 - 余额刷新受腾讯后端限流影响（约每日 15:12 UTC+8 重置窗口），刷新失败余额保持不变
+
+### 3.6 OAuth 一键加号（不需要桌面端）
+
+账号页的 **「OAuth 添加」** 按钮：在浏览器完成一次官方登录即可把账号加进号池，
+**不需要桌面端参与、也不需要手工拷贝 `.info`**。云上部署（Sealos 等）时这条路径最省事。
+
+流程与官方 CodeBuddy CLI / WorkBuddy 桌面端**完全同一套**（两端 `product.json` 的
+`platform` 都是 `CLI`、`prefixPath` 都是 `/plugin`，只有 `productName` 与 `auth.id` 不同）：
+
+```
+① POST {backend}/v2/plugin/auth/state?platform=CLI   -> {state, authUrl}
+② 人工在浏览器打开 authUrl 完成登录
+③ GET  {backend}/v2/plugin/auth/token?state=<state>  -> {accessToken, refreshToken, expiresIn, domain}
+④ GET  {backend}/v2/plugin/login/account?state=…     -> {uid, enterpriseId, nickname}   （带 Bearer）
+```
+
+无 PKCE、无 `client_secret`、无 device_code —— 全部用标准库 `httpx` 实现
+（`admin/oauth_login.py`），不依赖官方客户端的任何二进制。
+
+**怎么知道对方登录完了？—— 没有回调，只有轮询。**
+
+上游不推送、也不存在回调地址，全靠主动问。三层都是「问」：
+
+```
+浏览器（前端）  setInterval 2.5s
+   └─ GET /api/oauth/status/{login_id}
+        后端 poll_login()                     ← 只有前端来问，后端才去问上游；
+   └─ GET {backend}/v2/plugin/auth/token?state=<state>
+        上游：state 还没绑账号 → 返回业务码 11217（"login ing"）
+        …
+        对方在手机完成登录 → 上游把账号绑到 state
+        下一次轮询     → 返回 {accessToken, refreshToken, expiresIn, domain}
+   └─ GET {backend}/v2/plugin/login/account?state=<state>   （拿 uid / 昵称）
+```
+
+好处是**不需要公网回调地址、不用额外端口、不用验签**，Sealos 上少一堆配置；
+代价是必须有人一直在问 —— 所以前端轮询是这条链路的心跳。
+
+**业务码语义（照搬官方实现，别自行放宽）**
+
+| 端点 | pending 码 | 其他码 |
+| --- | --- | --- |
+| `/v2/plugin/auth/token?state=` | `11217` | **一律致命**，立即终止并回传前端 |
+| `/v2/plugin/login/account?state=` | `12151` | 告警后放弃（凭据已到手，只缺昵称/uid） |
+
+官方轮询参数：间隔 **1 秒**、总超时 **300 秒**。本项目间隔放宽到 2.5 秒（前端），会话 TTL 600 秒。
+
+> ⚠️ **不要把「任何非 0 码」当成 pending**。官方只认上面这两个码，其余非 0 码会直接抛
+> `Failed to fetch auth token`。若笼统当成 pending，真实错误会伪装成「一直在等待登录」，
+> 直到超时才暴露 —— 这正是本项目第一版实现踩过的坑，已修。
+> 判定成功的口径也要对齐官方：**只看 `data.accessToken` 是否为非空字符串**，不看 code。
+
+> ℹ️ 实测发现：**上游对「伪造的 state」也返回 `11217`**，即 pending 与「state 不存在」
+> 在 token 端点侧不可区分。本项目靠自己的会话 TTL 兜底 —— 过期即回收，前端会拿到 404 并提示重新发起。
+
+> 🔗 **链接可以转发给他人**（手机浏览器同样可用）。`authUrl` 的 query 只有
+> `platform` + `state`，**不含任何设备指纹**，所以授权天然跨设备、跨人。
+> 语义是「**谁在链接里完成登录，就加谁的账号**」——因为 state 记录的是登录结果，不是发起方。
+> 因此请勿把链接发到公开渠道（会被塞进无关账号）；反过来，拿到链接的人也**碰不到你的账号**。
+> 实操建议：一个链接只发给一个人，10 分钟内完成。
+
+**安全设计（务必了解）**
+
+| 项 | 做法 |
+| --- | --- |
+| `state` 的存放 | **只在服务端内存**。`state` 本身就是凭据（谁拿到谁能 poll 出 token），所以绝不下发浏览器、也不写日志 |
+| 前端句柄 | 只给一次性随机 `login_id`（32 字符 `token_urlsafe`），真实 `state` 不出后端 |
+| 鉴权 | 三个接口（`start` / `status` / `commit`）全部要求管理员登录态（`X-Admin-Token`） |
+| 有效期 | 会话默认 **10 分钟**过期，过期即回收 `state` 与 HTTP 客户端 |
+| 一次性 | `commit` 领取凭据后**立即销毁会话**，token 不长期驻留内存 |
+| token 回传浏览器 | **不回**。`status` 只返回昵称 / uid / 域等元信息；凭据由服务端直接写入数据库 |
+| 会话隔离 | 每个登录流程独立 `httpx.Client`（自带 cookie jar），多账号连续登录互不串会话 |
+
+**重复授权**：若 `uid` 已在号池中，`commit` 走**更新**而不是新增 —— 覆盖 `auth_json`，
+并把 `status` / `err_count` / `cool_until` 一并复位（token 失效后重新授权即可，不会堆重复条目）。
+
+**相关环境变量**（都可省略，用默认值即可）
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `ADMIN_OAUTH_PLATFORM` | `CLI` | 授权时带的 `platform`。官方 CLI 与桌面端**都是 `CLI`** |
+| `ADMIN_OAUTH_USER_AGENT` | `CLI/2.148.0 CodeBuddy/2.148.0` | 出站 UA。官方格式为 `{platform}/{ver} {productName}/{ver}`，**随客户端版本变化，建议按本机实际版本调整**；走桌面端身份可改为 `CLI/<ver> WorkBuddy/<ver>` |
+| `ADMIN_OAUTH_ORIGIN` | `https://www.codebuddy.cn` | `Origin` / `Referer` |
+| `ADMIN_OAUTH_TTL` | `600` | 登录会话存活秒数 |
+| `ADMIN_OAUTH_TIMEOUT` | `15` | 单次上游请求超时秒数 |
+
+**前端行为**：点按钮 → 弹窗给出授权链接（可一键打开 / 复制）→ 前端每 2.5 秒轮询一次状态
+→ 登录完成自动跳到确认页（显示昵称 / UID / 域）→ 点「加入号池」入库并刷新余额。
+关闭弹窗或按 Esc 会清掉轮询定时器（统一挂在 `_modalCleanups` 上）。
+
+> 排查用：`GET /api/oauth/pending` 返回当前未完成的登录会话数，可确认没有悬挂的 `state`。
+
+### 3.7 客户端身份画像（workbuddy / codebuddy）
+
+官方两个客户端 —— **WorkBuddy 桌面端** 与 **CodeBuddy CLI** —— 在服务端看来**是同一套客户端**：
+
+| product.json 字段 | WorkBuddy 桌面端 | CodeBuddy CLI |
+| --- | --- | --- |
+| `platform` | `CLI` | `CLI` |
+| `deploymentType`（→ `X-Product`） | `SaaS` | `SaaS` |
+| `authentication.attributes.prefixPath` | `/plugin` | `/plugin` |
+| `authentication.id`（→ `.info` 文件名） | `workbuddy-desktop` | `Tencent-Cloud.coding-copilot` |
+| `productName`（→ UA 里的产品名） | `WorkBuddy` | `CodeBuddy` |
+
+两端端点完全相同、`X-Auth-Refresh-Source` 都是 `plugin`。**出站请求只有两处差异**：
+
+| 头 | workbuddy | codebuddy |
+| --- | --- | --- |
+| `User-Agent` | `CLI/<版本> WorkBuddy/<版本>` | `CLI/<版本> CodeBuddy/<版本>` |
+| `X-Device-Token` | 带（仅「模型 / 签到」请求，且本机装有 Turing SDK 时才取得到） | **不带** |
+
+> 因此按域自动选择身份的意义是**让请求画像自洽**：既然是桌面端身份就发桌面端 UA，
+> 既然是 CLI 身份就别带设备指纹。混搭（发桌面端 UA 却不带设备指纹、
+> 或带设备指纹却发 CLI UA）比"完全不像"更容易被风控盯上。
+
+**怎么判定**
+
+- **无需任何配置与存储**：出站时按凭据自身的 `auth.domain` 现算——
+  含 `workbuddy` → 桌面端身份，其它非空 → CLI 身份；domain 缺失时用
+  `ADMIN_UPSTREAM_CLIENT_KIND` 兜底（默认 workbuddy）。
+- 推断结果不落库：同一份凭据换域（企业切换等）后，下次出站自动跟随新域。
+
+> ⚠️ **升级注意**：改动前所有账号的出站 UA 都是自造的 `codebuddy2openai/2.0`，
+> 现在会变成真实的客户端 UA。这是有意的修正（那个自造名本身就是画像不自洽的风险点）。
+> 想完全恢复旧行为：`ADMIN_UA_WORKBUDDY=codebuddy2openai/2.0`。
+
+| 环境变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `ADMIN_UPSTREAM_CLIENT_KIND` | `workbuddy` | 凭据里 `auth.domain` 缺失时的兜底身份 |
+| `ADMIN_UA_WORKBUDDY` | `CLI/5.3.14 WorkBuddy/5.3.14` | 桌面端 UA。**版本号是按官方拼装规则与其 product.json 推断的**（桌面端不打印 API 请求头，无法从日志确认），升级客户端后请同步 |
+| `ADMIN_UA_CODECLI` | `CLI/2.148.0 CodeBuddy/2.148.0` | CLI UA。版本号来自本机真实请求日志，**实测确认** |
 
 ---
 
@@ -523,7 +659,8 @@ workbuddy2api/
 │   ├── backend.py            # 复用 converter.CredentialManager 操作单账号（含签到）
 │   ├── scheduler.py          # 轻量定时任务：refresh_balances / sync_models / daily_checkin
 │   ├── turing_token.py       # Python 侧 X-Device-Token 提供器（subprocess 调 helper）
-│   ├── routers/              # accounts / keys / proxy / schedules / logs / sync / models
+│   ├── oauth_login.py        # OAuth 设备授权登录（浏览器登录换凭据，不需桌面端）
+│   ├── routers/              # accounts / oauth / keys / proxy / schedules / logs / sync / models
 │   └── static/index.html     # 纯 HTML + TailwindCSS + FontAwesome 管理大屏
 └── README.md
 

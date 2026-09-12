@@ -113,6 +113,7 @@
         <div class="flex flex-wrap gap-2 tools">
           <button onclick="scanLocal()" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50"><i class="fa-solid fa-magnifying-glass mr-1"></i> 扫描本机</button>
           <button onclick="refreshAll()" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50"><i class="fa-solid fa-rotate mr-1"></i> 全部刷新</button>
+          <button onclick="openOauthAdd()" class="text-sm px-3 py-1.5 rounded-lg border border-emerald-200 text-emerald-700 bg-emerald-50 hover:bg-emerald-100"><i class="fa-solid fa-user-plus mr-1"></i> OAuth 添加</button>
           <button onclick="openUpload()" class="text-sm px-3 py-1.5 rounded-lg btn-primary"><i class="fa-solid fa-file-import mr-1"></i> 批量上传</button>
           <button onclick="openAddAccount()" class="text-sm px-3 py-1.5 rounded-lg border hover:bg-slate-50"><i class="fa-solid fa-plus mr-1"></i> 单个添加</button>
         </div>
@@ -372,8 +373,15 @@ function toast(msg, type = "ok") {
   $("#toasts").appendChild(el);
   setTimeout(() => el.remove(), 3200);
 }
-function openModal(html) { $("#modalBox").innerHTML = html; $("#modal").classList.remove("hidden"); $("#modal").classList.add("flex"); }
-function closeModal() { $("#modal").classList.add("hidden"); $("#modal").classList.remove("flex"); }
+/* 模态框 + 清理钩子：需要轮询/定时器的弹窗把 clearInterval 之类的收尾函数
+   注册到 _modalCleanups，关闭（含点遮罩、按 Esc）时会统一执行，避免定时器泄漏。 */
+let _modalCleanups = [];
+function _runModalCleanups() {
+  const fns = _modalCleanups; _modalCleanups = [];
+  fns.forEach(f => { try { f(); } catch (e) { console.warn("modal cleanup failed", e); } });
+}
+function openModal(html) { _runModalCleanups(); $("#modalBox").innerHTML = html; $("#modal").classList.remove("hidden"); $("#modal").classList.add("flex"); }
+function closeModal() { _runModalCleanups(); $("#modal").classList.add("hidden"); $("#modal").classList.remove("flex"); }
 function copyText(sel){ const i = $(sel); if(!i) return; i.select(); navigator.clipboard?.writeText(i.value) || document.execCommand("copy"); toast("已复制"); }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -435,15 +443,18 @@ function pagerHtml(total, page, totalPages, fn) {
 function accRow(a) {
   return `
     <tr class="border-t hover:bg-slate-50">
-      <td class="px-4 py-3">${esc(a.name || "未命名")}</td>
+      <td class="px-4 py-3">
+        <div>${esc(a.name || "未命名")}</div>
+        <div class="mt-1 text-[10px] text-slate-400" title="出站身份按凭据 domain 自动推断：*workbuddy* → 桌面端 UA，其它 → CLI UA">${esc(a.domain || "-")}</div>
+      </td>
       <td class="px-4 py-3 text-slate-500 font-mono text-xs">${esc(a.uid || "-")}</td>
       <td class="px-4 py-3">${badge(a.status)}</td>
       <td class="px-4 py-3">${a.balance_total}</td>
       <td class="px-4 py-3 font-medium ${a.balance_remain>0?'text-emerald-600':'text-red-500'}">${a.balance_remain}</td>
       <td class="px-4 py-3 text-slate-400 text-xs whitespace-nowrap">${fmtTime(a.last_sync_at)}</td>
       <td class="px-4 py-3 text-right whitespace-nowrap">
-        <button onclick="viewCreditDetails(${a.id},'${esc(a.name||'')}')" class="text-amber-600 hover:text-amber-800 mr-1" title="查看积分明细"><i class="fa-solid fa-list-ul"></i></button>
-        <button onclick="viewRequestUsage(${a.id},'${esc(a.name||'')}')" class="text-blue-600 hover:text-blue-800 mr-1" title="请求用量"><i class="fa-solid fa-chart-line"></i></button>
+        <button onclick="viewCreditDetails(${a.id})" class="text-amber-600 hover:text-amber-800 mr-1" title="查看积分明细"><i class="fa-solid fa-list-ul"></i></button>
+        <button onclick="viewRequestUsage(${a.id})" class="text-blue-600 hover:text-blue-800 mr-1" title="请求用量"><i class="fa-solid fa-chart-line"></i></button>
         <button onclick="injectAcc(${a.id})" class="text-violet-600 hover:text-violet-800 mr-1" title="注入到本机客户端"><i class="fa-solid fa-right-to-bracket"></i></button>
         <button onclick="refreshAcc(${a.id})" class="text-indigo-600 hover:text-indigo-800 mr-1" title="刷新余额"><i class="fa-solid fa-rotate"></i></button>
         <button onclick="toggleAcc(${a.id},'${a.status==='active'?'disabled':'active'}')" class="text-slate-500 hover:text-slate-800 mr-1" title="启用/禁用"><i class="fa-solid fa-power-off"></i></button>
@@ -485,7 +496,9 @@ async function injectAcc(id){
 }
 
 /* 积分明细 */
-async function viewCreditDetails(id, name){
+async function viewCreditDetails(id){
+  // 名称不经过 onclick 传参（昵称可能含引号会截断内联 JS），改从已加载的账号缓存取
+  const name = (_accData.find(a => a.id === id) || {}).name || "";
   openModal(`<h3 class="font-bold mb-1"><i class="fa-solid fa-list-ul mr-1"></i> 积分明细 — ${esc(name)}</h3><p class="text-xs text-slate-400 mb-3">加载中...</p><div id="creditDetailBody"></div>
     <div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`);
   try {
@@ -534,7 +547,8 @@ const _RU_FIELD_MAP = {
   client:"客户端", requestTime:"请求时间",
   inputTrunc:"输入(截断)", input:"输入(完整)", agentPurpose:"用途",
 };
-async function viewRequestUsage(id, name){
+async function viewRequestUsage(id){
+  const name = (_accData.find(a => a.id === id) || {}).name || "";  // 同上：从缓存取，避免内联引号问题
   const today = new Date().toISOString().slice(0,10);
   _ruState = { id, name, page:1, size:20, total:0, start:today, end:today };
   openModal(`
@@ -643,7 +657,7 @@ async function scanLocal(){
         <div class="flex flex-wrap items-center justify-end gap-1.5">
           ${it.is_active?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-700">当前</span>':''}
           ${inPool?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-indigo-100 text-indigo-700">号池已有</span>':''}
-          <button onclick="importOne('${encodeURIComponent(it.file)}')" ${inPool?'disabled':''} class="${inPool?'text-slate-300 cursor-not-allowed border-slate-100 bg-slate-50':'text-indigo-600 hover:text-indigo-800 border-indigo-100 hover:bg-indigo-50'} text-xs font-medium px-2 py-1 rounded border"><i class="fa-solid ${inPool?'fa-check':'fa-download'} mr-1"></i>${inPool?'已导入':'导入'}</button>
+          <button onclick="importOne('${encodeURIComponent(it.file).replace(/'/g,'%27')}')" ${inPool?'disabled':''} class="${inPool?'text-slate-300 cursor-not-allowed border-slate-100 bg-slate-50':'text-indigo-600 hover:text-indigo-800 border-indigo-100 hover:bg-indigo-50'} text-xs font-medium px-2 py-1 rounded border"><i class="fa-solid ${inPool?'fa-check':'fa-download'} mr-1"></i>${inPool?'已导入':'导入'}</button>
         </div>
       </td>
     </tr>`;
@@ -666,7 +680,7 @@ async function scanLocal(){
           <div class="flex flex-wrap items-center gap-1.5 mt-2">
             ${it.is_active?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-700">当前</span>':''}
             ${inPool?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-indigo-100 text-indigo-700">号池已有</span>':''}
-            <button onclick="importOne('${encodeURIComponent(it.file)}')" ${inPool?'disabled':''} class="${inPool?'text-slate-300 cursor-not-allowed border-slate-100 bg-slate-50':'text-indigo-600 hover:text-indigo-800 border-indigo-100 hover:bg-indigo-50'} text-xs font-medium px-2 py-1 rounded border"><i class="fa-solid ${inPool?'fa-check':'fa-download'} mr-1"></i>${inPool?'已导入':'导入'}</button>
+            <button onclick="importOne('${encodeURIComponent(it.file).replace(/'/g,'%27')}')" ${inPool?'disabled':''} class="${inPool?'text-slate-300 cursor-not-allowed border-slate-100 bg-slate-50':'text-indigo-600 hover:text-indigo-800 border-indigo-100 hover:bg-indigo-50'} text-xs font-medium px-2 py-1 rounded border"><i class="fa-solid ${inPool?'fa-check':'fa-download'} mr-1"></i>${inPool?'已导入':'导入'}</button>
           </div>
         </div>
       </div>
@@ -804,6 +818,172 @@ async function submitAddAccount(){
   closeModal(); toast(r.ok?"已添加":"添加失败", r.ok?"ok":"err"); if(r.ok) loadAccounts();
 }
 
+/* ==================== OAuth 添加账号 ====================
+   在浏览器完成一次官方登录即可加号，不需要桌面端、也不需要手工拷 .info。
+   真实 state 由服务端保管，前端只拿到一次性的 login_id，token 全程不回浏览器。 */
+let _oa = null;          // 当前 OAuth 流程：{ loginId, authUrl, timer, tries, ready }
+const OA_POLL_MS = 2500;
+const OA_MAX_TRIES = 240;   // ≈10 分钟，与服务端会话 TTL 对齐
+
+function oaCleanup() {
+  if (_oa && _oa.timer) clearInterval(_oa.timer);
+  _oa = null;
+}
+
+async function openOauthAdd() {
+  openModal(`
+    <h3 class="font-bold mb-3"><i class="fa-solid fa-user-plus mr-1"></i> OAuth 添加账号</h3>
+    <p id="oaMsg" class="text-sm text-slate-500">正在申请授权链接…</p>
+    <div id="oaBody" class="mt-3"></div>
+    <div id="oaFoot" class="flex justify-end gap-2 mt-4">
+      <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+    </div>`);
+  /* 注意顺序：openModal 会先执行上一个弹窗的清理钩子，所以 _oa 必须在它之后赋值，
+     否则旧钩子里的 _oa = null 会把新对象清掉。 */
+  _oa = { loginId: null, authUrl: "", timer: null, tries: 0, ready: false };
+  _modalCleanups.push(oaCleanup);
+
+  let d = {};
+  try {
+    const r = await api("/api/oauth/start", { method: "POST" });
+    d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.auth_url) throw new Error(d.detail || "未知错误");
+  } catch (e) {
+    const p = $("#oaMsg"); if (p) p.innerHTML = `发起授权失败：<span class="text-red-600">${esc(e.message || e)}</span>`;
+    return;
+  }
+  if (!_oa) return;                       // 用户已关掉弹窗
+  _oa.loginId = d.login_id; _oa.authUrl = d.auth_url;
+  oaRenderPending(d.expires_in);
+  oaPoll();
+  _oa.timer = setInterval(oaPoll, OA_POLL_MS);
+}
+
+function oaRenderPending(expiresIn) {
+  const mins = Math.max(1, Math.round((expiresIn || 600) / 60));
+  const m = $("#oaMsg");
+  if (m) m.innerHTML = `在浏览器打开下面的链接完成登录，登录成功后<strong>会自动继续</strong>（链接 ${mins} 分钟内有效）。`;
+  const b = $("#oaBody");
+  if (!b) return;
+  b.innerHTML = `
+    <div class="border rounded-lg p-2 bg-slate-50">
+      <code class="text-[11px] break-all select-all">${esc(_oa.authUrl)}</code>
+    </div>
+    <div class="flex flex-wrap items-center gap-2 mt-2">
+      <a href="${esc(_oa.authUrl)}" target="_blank" rel="noopener" class="px-3 py-1.5 rounded-lg btn-primary text-sm"><i class="fa-solid fa-up-right-from-square mr-1"></i>打开登录页</a>
+      <button onclick="oaCopy()" class="px-3 py-1.5 rounded-lg border text-sm"><i class="fa-regular fa-copy mr-1"></i>复制链接</button>
+      <span class="text-xs text-slate-400 ml-1"><i class="fa-solid fa-circle-notch fa-spin mr-1"></i>等待登录完成…</span>
+    </div>
+    <p class="text-[11px] text-slate-400 mt-2">
+      账号与密码只在上游页面输入，本服务只接收登录结果，不会拿到你的密码。<br>
+      <strong class="text-slate-500">链接可以转发给他人</strong>（手机浏览器同样可用）：在链接里完成登录的人，
+      其账号就是最终加入号池的账号 —— 即「谁登录，就加谁的号」。请勿发到公开渠道。
+    </p>`;
+  const f = $("#oaFoot");
+  if (f) f.innerHTML = `<button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>`;
+}
+
+function oaCopy() {
+  if (!_oa || !_oa.authUrl) return;
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(_oa.authUrl).then(() => toast("链接已复制"), () => toast("复制失败，请手动选择文本", "err"));
+  } else {
+    toast("当前环境不支持自动复制，请手动选择", "err");
+  }
+}
+
+async function oaPoll() {
+  if (!_oa || !_oa.loginId || _oa.ready) return;
+  if (++_oa.tries > OA_MAX_TRIES) {
+    oaStopTimer();
+    const m = $("#oaMsg"); if (m) m.innerHTML = `等待超时（${Math.round(OA_MAX_TRIES * OA_POLL_MS / 60000)} 分钟未完成登录），请关闭后重新发起。`;
+    return;
+  }
+  let r, d = {};
+  try {
+    r = await api("/api/oauth/status/" + encodeURIComponent(_oa.loginId));
+    d = await r.json().catch(() => ({}));
+  } catch (e) { return; }                 // 网络抖动：静默重试
+  if (!_oa) return;
+  if (r.status === 404) {
+    oaStopTimer();
+    const m = $("#oaMsg"); if (m) m.innerHTML = `登录会话已过期，请关闭后重新发起。`;
+    return;
+  }
+  if (!r.ok) return;                      // 5xx 等：静默重试
+  if (d.status === "error") {
+    _oa.ready = true;                     // 终态，停止轮询
+    oaStopTimer();
+    oaRenderError(d.msg || "授权失败");
+    return;
+  }
+  if (d.status === "ready") {
+    _oa.ready = true;
+    oaStopTimer();
+    oaRenderReady(d.account || {});
+  }
+}
+
+function oaRenderError(msg) {
+  const m = $("#oaMsg");
+  if (m) m.innerHTML = `<span class="text-red-600"><i class="fa-solid fa-circle-exclamation mr-1"></i>授权失败</span>`;
+  const b = $("#oaBody");
+  if (b) b.innerHTML = `
+    <div class="border border-red-100 bg-red-50 rounded-lg p-3 text-xs text-red-700 break-all">${esc(msg)}</div>
+    <p class="text-[11px] text-slate-400 mt-2">会话已作废，请关闭后重新发起。若反复失败，检查服务端能否访问上游（<code>ADMIN_BACKEND</code>）以及容器时间是否准确。</p>`;
+  const f = $("#oaFoot");
+  if (f) f.innerHTML = `<button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button>
+    <button onclick="openOauthAdd()" class="px-3 py-1.5 rounded-lg btn-primary text-sm"><i class="fa-solid fa-rotate mr-1"></i>重新发起</button>`;
+}
+
+function oaStopTimer() { if (_oa && _oa.timer) { clearInterval(_oa.timer); _oa.timer = null; } }
+
+function oaRenderReady(a) {
+  const nick = a.nickname || "";
+  const m = $("#oaMsg");
+  if (m) m.innerHTML = `<span class="text-emerald-600"><i class="fa-solid fa-circle-check mr-1"></i>登录成功，确认后加入号池。</span>`;
+  const b = $("#oaBody");
+  if (!b) return;
+  b.innerHTML = `
+    <div class="border rounded-lg p-3 text-sm grid gap-1">
+      <div><span class="text-slate-400 mr-2">昵称</span>${esc(nick || "—")}</div>
+      <div><span class="text-slate-400 mr-2">UID</span><code class="text-xs">${esc(a.uid || "—")}</code></div>
+      <div><span class="text-slate-400 mr-2">域</span>${esc(a.domain || "—")}</div>
+    </div>
+    <input id="oaName" class="w-full border rounded-lg px-3 py-2 mt-2 text-sm" placeholder="名称（留空用昵称，之后可改）" value="${esc(nick)}" />`;
+  const f = $("#oaFoot");
+  if (f) f.innerHTML = `
+    <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">取消</button>
+    <button id="oaCommitBtn" onclick="oaCommit()" class="px-3 py-1.5 rounded-lg btn-primary text-sm"><i class="fa-solid fa-plus mr-1"></i>加入号池</button>`;
+}
+
+async function oaCommit() {
+  if (!_oa || !_oa.loginId) return;
+  const btn = $("#oaCommitBtn");
+  if (btn) { btn.disabled = true; btn.innerHTML = `<i class="fa-solid fa-circle-notch fa-spin mr-1"></i>添加中…`; }
+  const name = ($("#oaName") && $("#oaName").value) || "";
+  let r, d = {};
+  try {
+    r = await api("/api/oauth/commit/" + encodeURIComponent(_oa.loginId), {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name }),
+    });
+    d = await r.json().catch(() => ({}));
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.innerHTML = `<i class="fa-solid fa-plus mr-1"></i>加入号池`; }
+    toast("添加失败：" + (e.message || e), "err");
+    return;
+  }
+  if (!r.ok) {
+    if (btn) { btn.disabled = false; btn.innerHTML = `<i class="fa-solid fa-plus mr-1"></i>加入号池`; }
+    toast("添加失败：" + (d.detail || ("HTTP " + r.status)), "err");
+    return;
+  }
+  closeModal();
+  const warn = d.balance_refreshed === false ? "（余额刷新失败，可稍后手动刷新）" : "";
+  toast(`${d.updated ? "已更新" : "已添加"}账号 ${esc(d.name || "")} · 余额 ${d.balance_remain ?? "-"}${warn}`);
+  loadAccounts();
+}
+
 /* ==================== Keys ==================== */
 function keyRow(k) {
   return `
@@ -814,8 +994,8 @@ function keyRow(k) {
       <td class="px-4 py-3 ${k.credit_used>=k.credit_limit&&!k.unlimited?'text-red-500':''}">${k.credit_used}</td>
       <td class="px-4 py-3">${k.status==="active"?'<span class="px-2 py-0.5 rounded-full text-xs bg-emerald-100 text-emerald-700">正常</span>':'<span class="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-500">已吊销</span>'}</td>
       <td class="px-4 py-3 text-right whitespace-nowrap">
-        <button onclick="viewKeyUsage(${k.id},'${esc(k.name||'')}')" class="text-blue-600 hover:text-blue-800 mr-1" title="查看用量"><i class="fa-solid fa-chart-pie"></i></button>
-        <button onclick="viewKeyFull(${k.id},'${esc(k.name||'')}')" class="text-violet-600 hover:text-violet-800 mr-1" title="查看完整Key"><i class="fa-solid fa-eye"></i></button>
+        <button onclick="viewKeyUsage(${k.id})" class="text-blue-600 hover:text-blue-800 mr-1" title="查看用量"><i class="fa-solid fa-chart-pie"></i></button>
+        <button onclick="viewKeyFull(${k.id})" class="text-violet-600 hover:text-violet-800 mr-1" title="查看完整Key"><i class="fa-solid fa-eye"></i></button>
         <button onclick="editKey(${k.id},${k.credit_limit},'${k.status}')" class="text-indigo-600 hover:text-indigo-800 mr-1" title="调整"><i class="fa-solid fa-sliders"></i></button>
         <button onclick="deleteKey(${k.id})" class="text-red-500 hover:text-red-700" title="删除"><i class="fa-solid fa-trash"></i></button>
       </td>
@@ -900,7 +1080,8 @@ async function submitAddKey(){
       <div class="flex justify-end mt-4"><button onclick="closeModal();loadKeys()" class="px-3 py-1.5 rounded-lg border text-sm">完成</button></div>`);
   } else { toast("创建失败","err"); }
 }
-async function viewKeyFull(id, name){
+async function viewKeyFull(id){
+  const name = (_keyData.find(k => k.id === id) || {}).name || "";  // 名称从缓存取，避免内联引号问题
   openModal(`<h3 class="font-bold mb-1"><i class="fa-solid fa-eye mr-1"></i> 查看 Key — ${esc(name)}</h3><p class="text-xs text-slate-400 mb-3">加载中...</p><div id="keyFullBody"></div>
     <div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`);
   try{
@@ -912,7 +1093,8 @@ async function viewKeyFull(id, name){
       <div class="flex gap-2"><input readonly id="fullKeyValue" class="w-full border rounded-lg px-3 py-2 text-sm font-mono bg-slate-50" value="${esc(d.key)}"><button onclick="copyText('#fullKeyValue')" class="px-3 bg-wb text-white rounded-lg text-sm shrink-0">复制</button></div>`;
   } catch(e){ $("#keyFullBody").innerHTML=`<p class="text-red-500 text-sm">异常: ${esc(e.message)}</p>`; }
 }
-async function viewKeyUsage(id, name){
+async function viewKeyUsage(id){
+  const name = (_keyData.find(k => k.id === id) || {}).name || "";  // 同上
   openModal(`<h3 class="font-bold mb-1"><i class="fa-solid fa-chart-pie mr-1"></i> Key 用量 — ${esc(name)}</h3><p class="text-xs text-slate-400 mb-3">加载中...</p><div id="keyUsageBody"></div>
     <div class="flex justify-end mt-4"><button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button></div>`);
   try{
@@ -960,7 +1142,7 @@ function modelRow(m) {
       <td class="px-4 py-3 text-slate-400 text-xs">${esc(m.note||'-')}</td>
       <td class="px-4 py-3">${m.enabled?'<span class="px-2 py-0.5 rounded-full text-xs bg-emerald-100 text-emerald-700">启用</span>':'<span class="px-2 py-0.5 rounded-full text-xs bg-slate-100 text-slate-500">禁用</span>'}</td>
       <td class="px-4 py-3 text-right whitespace-nowrap">
-        <button onclick="speedTestModel(${JSON.stringify(m.model_id)}, this)" class="text-sky-600 hover:text-sky-800 text-sm mr-2" title="测速（用账号池直接请求上游，免 Key）"><i class="fa-solid fa-gauge-high"></i></button>
+        <button data-mid="${esc(m.model_id)}" onclick="speedTestModel(this.dataset.mid, this)" class="text-sky-600 hover:text-sky-800 text-sm mr-2" title="测速（用账号池直接请求上游，免 Key）"><i class="fa-solid fa-gauge-high"></i></button>
         <button onclick="toggleModel(${m.id},${!m.enabled})" class="${m.enabled?'text-amber-600 hover:text-amber-800':'text-emerald-600 hover:text-emerald-800'} text-sm mr-2" title="${m.enabled?'禁用':'启用'}"><i class="fa-solid ${m.enabled?'fa-ban':'fa-check'}"></i></button>
         <button onclick="deleteModelConfig(${m.id})" class="text-red-500 hover:text-red-700" title="移除"><i class="fa-solid fa-trash"></i></button>
       </td>

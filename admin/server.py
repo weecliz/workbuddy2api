@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from admin.config import settings
 from admin.db import ensure_database, init_db, SessionLocal
 from admin.models import SystemSetting
-from admin.routers import accounts, keys, logs, models, proxy, schedules, sync
+from admin.routers import accounts, keys, logs, models, oauth, proxy, schedules, sync
 from admin.ratelimit import clear_failures, get_client_ip, is_locked, record_failure
 from admin.security import (
     create_admin_token,
@@ -58,6 +58,7 @@ async def _security_headers(request: Request, call_next):
     return response
 
 app.include_router(accounts.router)
+app.include_router(oauth.router)
 app.include_router(keys.router)
 app.include_router(models.router)
 app.include_router(proxy.router)
