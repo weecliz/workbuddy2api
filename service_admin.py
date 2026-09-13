@@ -345,6 +345,12 @@ def _set_failure_actions(quiet: bool = False) -> None:
 
     quiet=True 供服务自身在每次启动时调用（服务以 LocalSystem 运行，
     有权限改自己的配置），用于修复历史实例上这个配置为空的情况。
+
+    **参数必须是 dict 而不是 tuple**：pywin32 的 ChangeServiceConfig2 对
+    SERVICE_CONFIG_FAILURE_ACTIONS 要求
+    {'ResetPeriod':int,'RebootMsg':str,'Command':str,'Actions':[...]}，
+    传 tuple 会直接抛 TypeError。历史版本传的是 tuple，所以本函数**从未成功过**
+    —— 这正是服务既没有自动重启、`Actions` 查询结果为空的原因。
     """
     scm = hs = None
     try:
@@ -358,15 +364,18 @@ def _set_failure_actions(quiet: bool = False) -> None:
         win32service.ChangeServiceConfig2(
             hs,
             win32service.SERVICE_CONFIG_FAILURE_ACTIONS,
-            (86400, None, None, actions),
+            {"ResetPeriod": 86400, "RebootMsg": "", "Command": "", "Actions": actions},
         )
+        if not _failure_actions_configured():
+            raise RuntimeError("写入后自检仍为未配置，SCM 未接受该策略")
         if not quiet:
             print("[ok] 失败恢复策略：进程异常退出后 5 秒自动重启（最多连试 3 次）")
     except Exception as e:
         if not quiet:
             print(f"[warn] 设置失败恢复策略失败，可稍后在 services.msc 手动配置：{e}")
         else:
-            logging.warning("设置失败恢复策略失败（服务自身无权限？）：%s", e)
+            logging.warning("设置失败恢复策略失败（服务自身无权限？）：%s: %s",
+                            type(e).__name__, e)
     finally:
         if hs:
             win32service.CloseServiceHandle(hs)
