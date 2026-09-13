@@ -26,6 +26,18 @@
 admin/scheduler.py 的调度线程没有跨进程锁，多 worker 会让「每日签到」
 并发重复执行（真打上游，有风控风险）。服务方式天然是单进程，勿改。
 
+假死自愈（为什么需要）
+----------------------
+Windows 上 asyncio 的 Proactor 事件循环在并发 accept 出错时，会关闭监听
+socket 且不再重新 accept（CPython `proactor_events.py:863-870`），于是出现
+「进程活着、状态 RUNNING、但永远接不到连接」的假死；SCM 看不到退出，
+失败恢复策略不触发。实测该状态下网关静默 11 分钟。
+本文件因此做了两件事：
+  1) 启动时自检并补写 SCM 失败恢复策略（历史上它可能是空的）；
+  2) 起一个看门狗线程，定期对监听端口发真实 HTTP 请求，连续失败即
+     主动退出进程，把「假死」转换成 SCM 能识别的「退出并重启」。
+可用 ADMIN_WATCHDOG_INTERVAL（秒）与 ADMIN_WATCHDOG_FAILURES（次数）调整。
+
 命令
 ----
     python service_admin.py install    注册服务并设为自动启动（需管理员）
@@ -47,6 +59,7 @@ import logging
 import os
 import socket
 import sys
+import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -264,6 +277,23 @@ class WorkbuddyAdminService(win32serviceutil.ServiceFramework):
             access_log=True,
         )
         self._server = uvicorn.Server(config)
+
+        # 启动前自检：历史实例上失败恢复策略可能是空的（实测 Actions=()），
+        # 那样一旦假死/崩溃就永远不会被拉起。服务以 LocalSystem 运行，有权限自补。
+        if not _failure_actions_configured():
+            logging.warning("失败恢复策略未配置，正在自动补配（否则假死后无人拉起）")
+            _set_failure_actions(quiet=True)
+        else:
+            logging.info("失败恢复策略已配置（异常退出后 5s/15s/60s 自动重启）")
+
+        # 监听器看门狗：Windows Proactor 的 accept 崩溃会让进程「活着但不再监听」，
+        # SCM 看不到退出因而不会重启。探活失败到阈值就主动退出，交给 SCM 拉起。
+        _start_listener_watchdog(port, self._stop_event)
+        logging.info(
+            "监听器看门狗已启动（每 %ss 探活一次，连续 %d 次失败则重启进程）",
+            WATCHDOG_INTERVAL_S, WATCHDOG_FAIL_THRESHOLD,
+        )
+
         asyncio.run(self._server.serve())
 
 
@@ -307,11 +337,14 @@ def _mysql_service_exists(name: str) -> bool:
         return False
 
 
-def _set_failure_actions() -> None:
+def _set_failure_actions(quiet: bool = False) -> None:
     """崩溃自动重启：5s / 15s / 60s，之后每天重置一次计数。
 
     端口被占、MySQL 没起来这类问题会让服务反复退出，有重启策略比
     手动去 services.msc 点「恢复」省事。失败只告警，不影响服务可用性。
+
+    quiet=True 供服务自身在每次启动时调用（服务以 LocalSystem 运行，
+    有权限改自己的配置），用于修复历史实例上这个配置为空的情况。
     """
     scm = hs = None
     try:
@@ -327,14 +360,110 @@ def _set_failure_actions() -> None:
             win32service.SERVICE_CONFIG_FAILURE_ACTIONS,
             (86400, None, None, actions),
         )
-        print("[ok] 失败恢复策略：进程异常退出后 5 秒自动重启（最多连试 3 次）")
+        if not quiet:
+            print("[ok] 失败恢复策略：进程异常退出后 5 秒自动重启（最多连试 3 次）")
     except Exception as e:
-        print(f"[warn] 设置失败恢复策略失败，可稍后在 services.msc 手动配置：{e}")
+        if not quiet:
+            print(f"[warn] 设置失败恢复策略失败，可稍后在 services.msc 手动配置：{e}")
+        else:
+            logging.warning("设置失败恢复策略失败（服务自身无权限？）：%s", e)
     finally:
         if hs:
             win32service.CloseServiceHandle(hs)
         if scm:
             win32service.CloseServiceHandle(scm)
+
+
+def _failure_actions_configured() -> bool:
+    """当前服务是否已配置「崩溃自动重启」。用于启动时自检并补配。"""
+    scm = hs = None
+    try:
+        scm = win32service.OpenSCManager(None, None, win32service.SC_MANAGER_CONNECT)
+        hs = win32service.OpenService(scm, SVC_NAME, win32service.SERVICE_QUERY_CONFIG)
+        cfg = win32service.QueryServiceConfig2(hs, win32service.SERVICE_CONFIG_FAILURE_ACTIONS)
+        return bool(cfg.get("Actions"))
+    except Exception:
+        return False
+    finally:
+        if hs:
+            win32service.CloseServiceHandle(hs)
+        if scm:
+            win32service.CloseServiceHandle(scm)
+
+
+# ---------------------------------------------------------------------------
+# 监听器看门狗
+# ---------------------------------------------------------------------------
+# 背景：Windows 上 asyncio 的 Proactor 事件循环在并发 accept 出错时，
+# proactor_events.py:863-870 会捕获 OSError 并**直接关闭监听 socket**，
+# 此后不再重新 accept —— 表现为「进程活着、服务状态 RUNNING、但再也接不到
+# 任何连接」的假死。SCM 看不到进程退出，因此失败恢复策略不会被触发。
+# 实测触发条件：约 40 个并发连接流入即可复现（OSError [WinError 64]）。
+#
+# 应对：进程内自探活。连续失败即判定假死，主动退出进程，由失败恢复策略
+# 在 5 秒内拉起一个全新的监听器。这是修复该缺陷唯一可靠的位置 ——
+# 缺陷在 CPython 自身，不修解释器源码无法从根上消除。
+WATCHDOG_INTERVAL_S = int(os.getenv("ADMIN_WATCHDOG_INTERVAL", "20"))
+WATCHDOG_FAIL_THRESHOLD = int(os.getenv("ADMIN_WATCHDOG_FAILURES", "3"))
+
+
+def _probe_listener(port: int, timeout: float = 3.0) -> bool:
+    """对自身监听端口做一次真实 TCP 连接 + 最小 HTTP 请求。
+
+    只做 connect 不够：假死的典型形态是监听 socket 已被关闭（connect 直接
+    失败），但事件循环被长任务卡住时 connect 仍可能排进 backlog。发一个请求
+    并读到任意响应字节，才能同时证明「accept 正常」且「事件循环在转」。
+    """
+    s = socket.socket()
+    s.settimeout(timeout)
+    try:
+        s.connect(("127.0.0.1", port))
+        s.sendall(b"GET /gw/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        return bool(s.recv(16))
+    except Exception:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _start_listener_watchdog(port: int, stop_event) -> threading.Thread:
+    """启动探活线程：连续失败达阈值就退出进程，交给 SCM 重启。
+
+    仅在服务模式下交由 SCM 重启才有意义；前台 run 模式下同样退出，因为
+    假死的服务进程留着也没有任何用处（不会自愈），不如让调用方看到退出。
+    """
+
+    def loop():
+        fails = 0
+        while not stop_event.is_set():
+            if _probe_listener(port):
+                if fails:
+                    logging.info("监听器探活恢复正常（之前连续失败 %d 次）", fails)
+                fails = 0
+            else:
+                fails += 1
+                logging.warning("监听器探活失败 %d/%d（端口 %s）", fails, WATCHDOG_FAIL_THRESHOLD, port)
+                if fails >= WATCHDOG_FAIL_THRESHOLD:
+                    logging.error(
+                        "监听器连续 %d 次无响应，判定为假死（进程存活但已不再 accept）。"
+                        " 主动退出进程以触发失败恢复策略重启；"
+                        " 若服务未配置失败恢复，请执行：python service_admin.py install",
+                        fails,
+                    )
+                    for h in logging.getLogger().handlers:
+                        try:
+                            h.flush()
+                        except Exception:
+                            pass
+                    os._exit(1)
+            stop_event.wait(WATCHDOG_INTERVAL_S)
+
+    t = threading.Thread(target=loop, name="listener-watchdog", daemon=True)
+    t.start()
+    return t
 
 
 def _install() -> int:
@@ -410,14 +539,20 @@ def _status() -> int:
     print(f"显示名   : {SVC_DISPLAY}")
     print(f"状态     : {_state_text(state)}")
     try:
-        import win32service as _ws
-
         cfg = win32serviceutil.QueryServiceConfig(SVC_NAME)
         print(f"启动类型 : {cfg[0]}  (2 = 自动)")
         print(f"ImagePath: {cfg[3]}")
     except Exception:
         pass
-    print(f"端口探测 : 8790 {'LISTENING' if _port_in_use(PORT_FALLBACK) else '无响应'}")
+    fa = _failure_actions_configured()
+    print(f"失败恢复 : {'已配置（异常退出 5s/15s/60s 自动重启）' if fa else '未配置 —— 假死/崩溃后不会被拉起'}")
+    from admin.config import settings as _s
+
+    port = int(_s.PORT or PORT_FALLBACK)
+    # 用真实 HTTP 探活，而不是仅 connect：假死的典型形态是监听 socket 已关闭，
+    # 但服务状态仍是 RUNNING，只看端口会误判。
+    ok = _probe_listener(port)
+    print(f"探活     : {port} {'正常（HTTP 有响应）' if ok else '无响应 —— 疑似假死，请重启服务'}")
     return 0
 
 
@@ -434,6 +569,13 @@ def _run_foreground() -> int:
     _setup_logging(console=True)
     _preflight_warnings(host, port)
     print(f"[run] 前台运行 mode，Ctrl+C 退出。日志同时写入 {LOG_FILE}")
+
+    # 前台/容器方式没有 SCM 兜底，但假死后主动退出仍然正确：进程留着不会自愈，
+    # 退出能让 systemd / docker restart=always / 调用方脚本重新拉起。
+    _start_listener_watchdog(port, threading.Event())
+    print(f"[run] 监听器看门狗已启动（每 {WATCHDOG_INTERVAL_S}s 探活，连续 "
+          f"{WATCHDOG_FAIL_THRESHOLD} 次失败则重启进程）")
+
     # 前台模式用 uvicorn.run：它会自己装信号处理器，Ctrl+C 可优雅退出
     uvicorn.run("admin.server:app", host=host, port=port, log_level="info")
     return 0

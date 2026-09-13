@@ -5,6 +5,7 @@
 """
 import json
 import logging
+import queue
 import re
 import threading
 import time
@@ -26,6 +27,15 @@ from admin.security import check_quota, get_key_row
 HTTP_LIMITS = backend.HTTP_LIMITS
 
 _logger = logging.getLogger("proxy")
+
+# 真实积分回写的有界队列 + 单 worker（见 _queue_real_credits / _credit_worker）。
+# 上限按「上游对账延迟 60s × 峰值 QPS」估：本机实测峰值 ~0.12 QPS，即便涨到
+# 10 QPS 也只积压约 600 条；取 2048 留足余量，同时给资源设硬上限。
+_CREDIT_QUEUE: "queue.Queue" = queue.Queue(maxsize=2048)
+_CREDIT_WORKER: threading.Thread | None = None
+_CREDIT_WORKER_LOCK = threading.Lock()
+# 上游用量接口的分钟级延迟：等够这么久去查才拿得到真实积分
+_CREDIT_DELAY_S = 60
 
 # Responses API 适配器（converter 同款）；缺失时 /v1/responses 优雅降级为 501
 try:
@@ -173,11 +183,7 @@ def _record_usage(key_id: int, account_id: int, model: str, credits: float | Non
             db.commit()
             log_id = log.id
             if estimated and account_id and updated_auth_json:
-                threading.Thread(
-                    target=_fetch_real_credits,
-                    args=(log_id, account_id, updated_auth_json, model, credits, log.created_at),
-                    daemon=True,
-                ).start()
+                _queue_real_credits(log_id, account_id, updated_auth_json, model, credits, log.created_at)
         finally:
             db.close()
     except Exception as e:  # 记账失败不应影响已返回的响应，但必须留痕便于排查
@@ -186,15 +192,77 @@ def _record_usage(key_id: int, account_id: int, model: str, credits: float | Non
     return log_id
 
 
+def _queue_real_credits(log_id: int, account_id: int, auth_json: str, model: str,
+                        estimated_credits: float, created_at: datetime) -> None:
+    """把「等待上游对账」的任务投进有界队列，由单个 worker 串行处理。
+
+    原先每次估算积分就起一个线程、线程内 sleep(60) 再回写，等价于「每请求
+    占一个线程 60 秒」。上游一旦开始不回 credit 字段，QPS 上到两位数就是几百
+    个并发线程，必然耗尽资源。改为有界队列 + 单 worker：worker 只做「到期时间
+    排序 + 到点回写」，sleep 不影响投递方。
+
+    队列满时丢弃并告警——回写只是把估算值修正为真实值，丢一条不影响记账
+    本身（UsageLog 已按估算倍率落库）。
+    """
+    if _CREDIT_QUEUE.full():
+        _logger.warning("真实积分回写队列已满（%d），丢弃 log=%s", _CREDIT_QUEUE.maxsize, log_id)
+        return
+    _start_credit_worker()
+    try:
+        _CREDIT_QUEUE.put_nowait((created_at, log_id, account_id, auth_json,
+                                  model, estimated_credits))
+    except queue.Full:  # pragma: no cover - 与 full() 竞态
+        _logger.warning("真实积分回写队列已满，丢弃 log=%s", log_id)
+
+
+def _credit_worker() -> None:
+    """单 worker：按 created_at 排序，等够 60s 再逐条回写。
+
+    上游用量接口有分钟级延迟，必须等约 60s 才查得到。这里用「堆顶到期时间」
+    决定睡眠时长，因此 sleep 是阻塞单线程而非每请求一线程——队列里积压再多，
+    也只有一个线程。
+    """
+    while True:
+        try:
+            item = _CREDIT_QUEUE.get()
+        except Exception:  # pragma: no cover - 队列异常不应杀死 worker
+            time.sleep(1)
+            continue
+        created_at, log_id, account_id, auth_json, model, estimated = item
+        try:
+            due = (created_at + timedelta(seconds=_CREDIT_DELAY_S)).timestamp()
+            wait = due - time.time()
+            if wait > 0:
+                time.sleep(min(wait, 300))
+            _fetch_real_credits(log_id, account_id, auth_json, model, estimated, created_at)
+        except Exception:
+            _logger.exception("真实积分回写 worker 处理失败 log=%s", log_id)
+        finally:
+            _CREDIT_QUEUE.task_done()
+
+
+def _start_credit_worker() -> None:
+    """幂等启动回写 worker（模块首次用到时拉起）。"""
+    global _CREDIT_WORKER
+    with _CREDIT_WORKER_LOCK:
+        if _CREDIT_WORKER is not None and _CREDIT_WORKER.is_alive():
+            return
+        _CREDIT_WORKER = threading.Thread(target=_credit_worker, name="credit-reconcile",
+                                          daemon=True)
+        _CREDIT_WORKER.start()
+        _logger.info("真实积分回写 worker 已启动（队列上限 %d）", _CREDIT_QUEUE.maxsize)
+
+
 def _fetch_real_credits(log_id: int, account_id: int, auth_json: str, model: str,
                         estimated_credits: float, created_at: datetime) -> None:
-    """延迟查询上游真实用量接口，回写 UsageLog.credits 并校正额度。
+    """查询上游真实用量接口，回写 UsageLog.credits 并校正额度。
 
     上游 /billing/meter/get-user-request-usage 有分钟级延迟，通常在请求完成后 30~90s
-    才能查到。这里等待 60s 后按 [created_at-5min, created_at+5min] + model 匹配最近一条。
+    才能查到。等待由 `_credit_worker` 统一负责（按 created_at 排序休眠），本函数只做
+    单次查询 + 回写，不再自带 sleep——否则就又变回「每请求一线程」。
+    匹配规则：[created_at-5min, created_at+5min] + model 取最近一条。
     """
     try:
-        time.sleep(60)
         sess = AccountSession(auth_json)
         try:
             start = (created_at - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
