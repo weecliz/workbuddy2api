@@ -16,6 +16,15 @@
 
 下次发布前，把改动累积在这一节；发布时改写成当天的日期标题。
 
+### 修复
+
+- **后台页面依赖全部本地化**：`/admin` 原先从 `cdn.tailwindcss.com` 与 `cdn.jsdelivr.net`
+  拉 Tailwind 与 FontAwesome。一旦机器无外网出口、或系统代理（如 `127.0.0.1:10808`）未开，
+  两个请求双双 `ERR_PROXY_CONNECTION_FAILED`，页面退化成无样式裸 HTML——登录框掉进页头、
+  统计卡片竖排、Tab 与表格全部走形。现改为引用仓库内 `admin/static/vendor/` 的
+  `tailwind.min.js`（Play CDN 3.0.0 构建）与 FontAwesome 6.5.2（CSS + woff2），
+  后台在内网 / 离线 / 代理异常环境下均正常渲染，也不再向第三方发出请求
+
 ---
 
 ## [2026-09-12]
