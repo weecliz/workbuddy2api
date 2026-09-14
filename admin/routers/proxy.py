@@ -1368,13 +1368,25 @@ async def models(
         acc.last_used_at = datetime.utcnow()
         acc.err_count = 0  # 成功即清零三振计数
         db.commit()
+        # 字段与 core/converter.py 的 /v1/models 保持一致：下游需要用
+        # max_input_tokens 判断上下文窗口、用 supports_* 判断能力开关。
+        # 只回传 id/name 会让客户端退回默认值（例如过早压缩上下文）。
         data = [{
             "id": m.get("id"),
             "object": "model",
+            "created": 1700000000,
             "owned_by": "codebuddy",
             "name": m.get("name") or m.get("id"),
+            "credits": m.get("credits"),
             "credit_multiplier": backend.CredentialManager._parse_credit_multiplier(m.get("credits"))
             if hasattr(backend.CredentialManager, "_parse_credit_multiplier") else None,
+            "description": m.get("descriptionZh") or m.get("descriptionEn"),
+            "supports_images": m.get("supportsImages"),
+            "supports_reasoning": m.get("supportsReasoning"),
+            "supports_tool_call": m.get("supportsToolCall"),
+            "max_input_tokens": m.get("maxInputTokens"),
+            "max_output_tokens": m.get("maxOutputTokens"),
+            "vendor": m.get("vendor"),
         } for m in models_raw if m.get("id") and _is_model_allowed(db, m.get("id")) and m.get("id","").lower() != "auto"]
         return {"object": "list", "data": data, "source": "backend"}
     except Exception as e:

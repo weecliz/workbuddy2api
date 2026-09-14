@@ -18,6 +18,15 @@
 
 ### 修复
 
+- **网关 `/v1/models` 丢弃模型能力与上下文元信息**：该端点原先只返回
+  `id`/`object`/`owned_by`/`name`/`credit_multiplier` 五个字段，而上游与内嵌 converter
+  的 `/v1/models` 一致提供 14 个。下游因此拿不到 `max_input_tokens`，依赖此字段判断
+  上下文窗口的客户端会退回默认值并过早压缩上下文（Claude Code 不受影响，它走
+  `/v1/messages/count_tokens`）；拿不到 `supports_tool_call` / `supports_reasoning` /
+  `supports_images` 则无法按能力路由或关闭功能。数据本就在 `models_raw` 里，只是未回传。
+  现补齐 `created`/`credits`/`description`/`supports_*`/`max_*_tokens`/`vendor`，
+  与 `core/converter.py` 的 `/v1/models` 字段集完全对齐（各 14 个，零差异），消除两个
+  端点的结构漂移
 - **Claude Code 多轮工具调用后报 `11148 tool calls and tool results do not match`**：
   `anthropic_adapter._convert_anthropic_message` 处理 user 消息时，若同一条消息里同时
   含 `tool_result` 与文本块（Claude Code 常附带的 `<system-reminder>`），原实现用
