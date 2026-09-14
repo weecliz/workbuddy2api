@@ -104,6 +104,14 @@
   同时那段排错提示本身也过时了（还在写「MySQL not running」、只提 `ADMIN_DATABASE_URL`），
   改为按当前方言（sqlite / mysql / db2）给出各自可能的原因，并附上
   `python -m admin.db_config` 与 `python scripts\db_probe.py` 两条自查命令
+- **模型配置页「全部启用 / 全部禁用」按钮点了没反应**：前后端契约不一致 ——
+  后端 `POST /api/models/batch-toggle` 按 `body.model_ids` 逐个更新，而该字段默认空列表；
+  前端按钮只发 `{enabled, level}`（本意是"全量"），于是循环体一次都不执行、恒返回
+  `{"updated": 0}`。HTTP 是 200、前端只提示"启用了 0 个模型"，所以表现为"按钮不起作用"。
+  现改为：`model_ids` 为空即作用于该 `level` 下的全部模型，给了列表则只更新列表内的；
+  只统计真正发生变化的行数，重复点击同方向时自然返回 `updated=0`。返回值补充 `level` 便于排查。
+  前端同时补上二次确认，并把 `updated=0` 单独提示为「已处于该状态，无需变更」，
+  不再让"合法空操作"看起来像失败
 - **Claude Code 多轮工具调用后报 `11148 tool calls and tool results do not match`**：
   `anthropic_adapter._convert_anthropic_message` 处理 user 消息时，若同一条消息里同时
   含 `tool_result` 与文本块（Claude Code 常附带的 `<system-reminder>`），原实现用
