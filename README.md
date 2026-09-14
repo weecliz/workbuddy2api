@@ -11,6 +11,7 @@
 ---
 
 ## 项目运行截图
+
 <img src="./images/img_1.png">
 <img src="./images/img_2.png">
 <img src="./images/img_3.png">
@@ -46,7 +47,7 @@
 ### 1.1 目标与边界
 
 | 项 | 说明 |
-|------|------|
+| ------ | ------ |
 | 安装目录 | `D:\workbuddy`（Windows，Git Bash 风格） |
 | 主程序包 | `D:\workbuddy\resources\app.asar`（Electron 打包，约 287MB） |
 | 解包产物 | `D:\workbuddy\app_source`（cli / main / preload / renderer） |
@@ -112,7 +113,7 @@ D:\workbuddy\app_source\
 ### 1.3 关键逆向发现（直接驱动了反代实现）
 
 | 发现 | 位置 | 对反代的意义 |
-|------|------|------|
+| ------ | ------ | ------ |
 | 设备风控头 `X-Device-Token` | `main/tar.js` `buildHeadersWithTuringToken` / `TURING_SHIELD_ID_HEADER="X-Device-Token"` | 反代必须给签到 / 对话请求注入该头，否则上游风控识别为「非真实客户端」 |
 | Turing SDK 桥接 | `resources/app.asar.unpacked/native/turing-sdk/index.cjs`（`configure` + `fetchDeviceToken`） | 复用了同一 SDK 给 Python 网关取 token（见 [2.3](#23-设备风控头提供器)） |
 | channelId = `109144` | `app_source/cli/product.json` → `turingSdk.channelId` | `turing_helper.js` 默认 channelId |
@@ -141,7 +142,7 @@ converter.py  (FastAPI)
 ### 2.2 支持的端点
 
 | 端点 | 说明 | 状态 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `POST /v1/chat/completions` | OpenAI Chat（流式） | 已支持 |
 | `POST /v1/responses` | OpenAI Responses（适配 Codex CLI，默认做投影压缩） | 已支持 |
 | `POST /v1/messages` | Anthropic Messages（适配 Claude Code / CC Switch） | 已支持 |
@@ -193,7 +194,7 @@ WORKBUDDY_VERSION              # 默认 2.0.0
 ### 3.2 稳定性设计（借鉴 `workbuddy2ap-2`）
 
 | 机制 | 实现位置 | 说明 |
-|------|----------|------|
+| ------ | ---------- | ------ |
 | **连接池** | `converter.py` / `admin/backend.py` | `httpx.Limits(max_connections=100, max_keepalive_connections=20)`，减少 TLS 握手 |
 | **账号级重试** | `admin/routers/proxy.py` | 单请求最多 3 次账号轮换；429/5xx/网络错误自动换号，401 session 死亡直接禁用 |
 | **错误分类** | `_classify_error` | 余额不足 / 429 / 404 / 5xx / session 死亡 / 网络层 分别处理 |
@@ -212,7 +213,7 @@ WORKBUDDY_VERSION              # 默认 2.0.0
 ### 3.4 路由总览
 
 | 模块 | 接口 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | 登录 | `POST /api/login` | 返回 JWT（放 `X-Admin-Token`） |
 | 账号 | `GET/POST /api/accounts` · `POST /api/accounts/batch` | 账号列表 + 汇总 / 新增单个 / 批量导入 |
 | 账号 | `POST /api/accounts/{id}/refresh` · `PATCH/DELETE /api/accounts/{id}` | 刷新余额 / 改状态 / 删除 |
@@ -411,7 +412,7 @@ Anthropic 端点（`/v1/messages`）相关：
 ### 4.1 前置依赖
 
 | 依赖 | 用途 | 版本 |
-|------|------|------|
+| ------ | ------ | ------ |
 | Python | 运行 converter / admin | 3.10+（推荐 3.12） |
 | Node.js | 设备风控头 `turing_helper.js`（require 桌面端 SDK） | 任意 LTS |
 | SQLite（默认） / MySQL / IBM Db2 | admin 账号池 / 用量库 | 三选一，由 `ADMIN_DB_TYPE` 切换。**默认 SQLite**（零依赖，无需装任何数据库，数据落在 `./data/workbuddy_admin.db`）；高并发生产建议 MySQL 8.x（`root/root`，库名 `workbuddy_admin`）或 Db2 LUW 11.x（`db2inst1`，库名 `WBADMIN`） |
@@ -502,7 +503,7 @@ docker run -d --name workbuddy2api -p 8787:8787 \
 ### 4.6 converter 命令行参数
 
 | 参数 | 默认值 | 说明 |
-|------|------|------|
+| ------ | ------ | ------ |
 | `--host` | `127.0.0.1` | 监听地址 |
 | `--port` | `8787` | 监听端口 |
 | `--api-key` | 无 | 给本地客户端加一层鉴权 |
