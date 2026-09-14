@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from admin.config import settings
 from admin.db import ensure_database, init_db, SessionLocal
+from admin.db_config import db_config
 from admin.models import SystemSetting
 from admin.routers import accounts, keys, logs, models, oauth, proxy, schedules, sync
 from admin.ratelimit import clear_failures, get_client_ip, is_locked, record_failure
@@ -69,6 +70,7 @@ app.include_router(logs.router)
 
 @app.on_event("startup")
 def _startup():
+    print(f"[db] {db_config.describe()}")
     ensure_database()
     init_db()
     from admin.scheduler import start_scheduler

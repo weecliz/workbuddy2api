@@ -182,7 +182,7 @@ WORKBUDDY_VERSION              # 默认 2.0.0
 
 ### 3.1 能力
 
-- **批量上传账号**：把桌面端 `.info` 登录文件原文（或数组 / 逐行）批量导入，存进 MySQL
+- **批量上传账号**：把桌面端 `.info` 登录文件原文（或数组 / 逐行）批量导入，存进数据库
 - **账号池自动切换**：每次请求从「启用 + 还有剩余额度」的账号里挑选（默认剩余最多优先，可切 LRU）
 - **查余额 / 刷新**：后台随时看每个账号总积分、剩余额度，并触发实时刷新
 - **API Key 管理**：后台创建 Key 给别人用，可设每个 Key 的积分上限
@@ -205,7 +205,7 @@ WORKBUDDY_VERSION              # 默认 2.0.0
 
 ### 3.3 技术栈
 
-- 后端：**FastAPI + SQLAlchemy 2.0 + MySQL 8（pymysql）+ Redis**
+- 后端：**FastAPI + SQLAlchemy 2.0 + Redis**，数据库默认 **SQLite（零依赖单文件，开箱即跑）**，可切 **MySQL 8（pymysql）** / **IBM Db2（ibm_db_sa）**，由 `ADMIN_DB_TYPE` 一处切换（见 [docs/DB_SUPPORT.md](docs/DB_SUPPORT.md)）
 - 前端：**纯 HTML + TailwindCSS + FontAwesome**（依赖随仓库放在 `admin/static/vendor/`，无需构建、无需外网），单页管理后台
 - 鉴权：后台 JWT（HS256）；代理 API Key 用 SHA-256 存储，明文仅创建时展示一次
 
@@ -233,7 +233,20 @@ WORKBUDDY_VERSION              # 默认 2.0.0
 
 ### 3.4 环境变量（admin）
 
-`ADMIN_DATABASE_URL` · `ADMIN_REDIS_URL` · `ADMIN_BACKEND` · `ADMIN_USERNAME` · `ADMIN_PASSWORD` · `ADMIN_JWT_SECRET`（≥32 字节）· `ADMIN_JWT_EXPIRE_HOURS` · `ADMIN_COST_PER_TOKEN` · `ADMIN_ACCOUNT_SELECT`（`remain` / `lru`）· `ADMIN_PORT` · `ADMIN_CLIENT_AUTH_DIR`
+`ADMIN_DB_TYPE`（`sqlite` 默认 / `mysql` / `db2`）· `ADMIN_DB_HOST` · `ADMIN_DB_PORT` · `ADMIN_DB_USER` · `ADMIN_DB_PASSWORD` · `ADMIN_DB_NAME`（SQLite 时是数据文件路径；`ADMIN_DB_SCHEMA` 用于 DB2）· `ADMIN_REDIS_URL` · `ADMIN_BACKEND` · `ADMIN_USERNAME` · `ADMIN_PASSWORD` · `ADMIN_JWT_SECRET`（≥32 字节）· `ADMIN_JWT_EXPIRE_HOURS` · `ADMIN_COST_PER_TOKEN` · `ADMIN_ACCOUNT_SELECT`（`remain` / `lru`）· `ADMIN_PORT` · `ADMIN_CLIENT_AUTH_DIR`
+
+也可用旧的 `ADMIN_DATABASE_URL` 直接给连接串（优先级更高）。
+
+**也可以在启动命令上直接指定数据库**（优先级高于 `.env`，只影响本次启动）：
+
+```bash
+python main.py                                              # 默认 SQLite，零依赖直接跑
+python main.py --db-type mysql --db-password xxx            # 临时改用 MySQL
+python main.py --db-type db2 --db-name WBADMIN --db-schema WBADMIN
+python main.py --list-db-types                              # 列出支持的类型
+```
+
+数据库类型 / 参数 / 各库差异见 [docs/DB_SUPPORT.md](docs/DB_SUPPORT.md)。
 
 OAuth 一键加号相关（`ADMIN_OAUTH_*`，均可省略）见 [3.6](#36-oauth-一键加号不需要桌面端)。
 客户端身份画像相关（`ADMIN_UPSTREAM_CLIENT_KIND` / `ADMIN_UA_*`）见 [3.7](#37-客户端身份画像workbuddy--codebuddy)。
@@ -255,7 +268,7 @@ Anthropic 端点（`/v1/messages`）相关：
 
 ### 3.5 已知限制
 
-- 账号凭据（`.info` 原文）以明文存于 MySQL，生产环境请加密存储或限制库访问
+- 账号凭据（`.info` 原文）以明文存于数据库，生产环境请加密存储或限制库访问
 - 后端未回传 `credits` 时，按 `completion_tokens × COST_PER_TOKEN` 估算扣费（经验值）
 - 配额扣减在流式结束后的 `finally` 里提交，高并发下非严格原子（极端竞态可能短暂超额）
 - 余额刷新受腾讯后端限流影响（约每日 15:12 UTC+8 重置窗口），刷新失败余额保持不变
@@ -401,7 +414,7 @@ Anthropic 端点（`/v1/messages`）相关：
 |------|------|------|
 | Python | 运行 converter / admin | 3.10+（推荐 3.12） |
 | Node.js | 设备风控头 `turing_helper.js`（require 桌面端 SDK） | 任意 LTS |
-| MySQL | admin 账号池 / 用量库 | 8.x，默认 `root/root`，库名 `workbuddy_admin` |
+| SQLite（默认） / MySQL / IBM Db2 | admin 账号池 / 用量库 | 三选一，由 `ADMIN_DB_TYPE` 切换。**默认 SQLite**（零依赖，无需装任何数据库，数据落在 `./data/workbuddy_admin.db`）；高并发生产建议 MySQL 8.x（`root/root`，库名 `workbuddy_admin`）或 Db2 LUW 11.x（`db2inst1`，库名 `WBADMIN`） |
 | Redis | admin Key / 配额缓存 | 默认 6379 |
 | WorkBuddy 桌面端 | 提供登录态 `.info` 与 Turing SDK | 已登录 |
 
@@ -417,7 +430,8 @@ Anthropic 端点（`/v1/messages`）相关：
 python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
 ```
 
-`requirements.txt`：`fastapi` · `uvicorn[standard]` · `httpx` · `sqlalchemy>=2.0` · `pymysql` · `redis` · `python-multipart` · `PyJWT` · `cryptography`
+`requirements.txt`：`fastapi` · `uvicorn[standard]` · `httpx` · `sqlalchemy>=2.0` · `pymysql`（MySQL 驱动）· `redis` · `python-multipart` · `PyJWT` · `cryptography`
+按数据库驱动三选一：MySQL 用 `pymysql`，DB2 用 `ibm_db_sa`，**SQLite 无需安装任何东西**（见 [docs/DB_SUPPORT.md](docs/DB_SUPPORT.md)）。
 
 ### 4.3 运行方式（三种）
 
@@ -440,7 +454,9 @@ python main.py --host 0.0.0.0 --port 8790
 
 `Ctrl+C` 优雅关闭；子进程异常退出则整体退出（避免孤儿进程）。启动时会告警弱密钥 / 弱口令，部署请覆盖 `ADMIN_JWT_SECRET` / `ADMIN_PASSWORD`。
 
-一键脚本（本机已配好）：`start_admin.bat`（强密码 + 固定 JWT secret 的一键启动）。
+一键脚本（本机已配好）：`scripts/start_admin.bat` 启动，`scripts/stop_admin.bat` 停止。
+停止脚本按端口找到进程树并优雅关闭（`--port` / `--force` / `--list` 可选），
+因为该服务是 `main.py → uvicorn` 的父子结构，只杀父进程会把子进程连同端口一起留下。
 
 #### 方式 B：仅本机桌面端直连（converter 独立）
 
@@ -655,9 +671,11 @@ workbuddy2api/
 │   ├── responses_projection.py # Codex / agent 请求投影压缩
 │   ├── anthropic_adapter.py  # Anthropic Messages ↔ Chat 适配
 │   └── desensitize.py        # 运行时文本压缩与零宽脱敏
-├── admin/                    # 多账号管理后台（FastAPI + MySQL + Redis）
+├── admin/                    # 多账号管理后台（FastAPI + MySQL/DB2/SQLite + Redis）
 │   ├── server.py             # FastAPI 入口、登录、静态页挂载、converter 挂 /gw
 │   ├── config.py             # 配置（环境变量覆盖）
+│   ├── db_config.py          # 数据库配置中心：类型 + 连接参数 → 连接串
+│   ├── db_dialect.py         # 方言适配：MySQL / DB2 / SQLite（引用符、类型映射、系统表）
 │   ├── db.py                 # SQLAlchemy 引擎 / 会话 / 建库建表 / 列迁移
 │   ├── models.py             # Account / ApiKey / UsageLog / Schedule ORM
 │   ├── security.py           # JWT、Key 哈希、配额拦截
@@ -680,7 +698,11 @@ workbuddy2api/
 ├── docs/                     # 部署文档：DEPLOY_WINDOWS / DEPLOY_SEALOS / ENV_SETUP
 ├── examples/                 # 客户端接入示例（手动合并进自己的配置，脚本不自动改写）
 │   └── codex-codebuddy.example.toml  # Codex CLI / Claude Code / 其它客户端接入片段
-├── scripts/                  # 本机一键脚本：start_admin / start_converter / 服务安装卸载
+├── scripts/                  # 本机一键脚本：start_admin / stop_admin / start_converter / 服务安装卸载
+│   ├── start_admin.bat       # 启动（参数原样转发给 main.py）
+│   ├── stop_admin.bat        # 停止（按端口找进程树，优雅关闭，可选 --force）
+│   ├── db_probe.py           # 启动前数据库自检（批处理共用，按方言检查驱动与连通性）
+│   └── _proc_tree.ps1        # stop_admin 的进程树查询辅助（查后代 / 祖先）
 ├── tests/                    # pytest：代理重试骨架 + 猫猫旅行状态机
 └── README.md
 

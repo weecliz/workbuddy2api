@@ -1,4 +1,4 @@
-"""管理后台配置（FastAPI + MySQL + Redis）。
+"""管理后台配置（FastAPI + MySQL/DB2 + Redis）。
 
 所有项均从环境变量读取，推荐通过项目根目录的 `.env` 文件提供（不要写死在代码里）。
 复制 `.env.example` 为 `.env` 并填入实际值后使用：
@@ -13,6 +13,8 @@ import logging
 
 from dotenv import load_dotenv
 
+from admin.db_config import db_config
+
 # 加载项目根目录的 .env（无论运行时 CWD 在哪都能找到）。
 # 不会覆盖已经存在的系统环境变量（便于容器 / systemd 注入）。
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -23,10 +25,12 @@ _logger = logging.getLogger(__name__)
 
 class Settings:
     # 数据库 / 缓存
-    DATABASE_URL = os.getenv(
-        "ADMIN_DATABASE_URL",
-        "mysql+pymysql://root:root@127.0.0.1:3306/workbuddy_admin?charset=utf8mb4",
-    )
+    # 数据库不再在这里写死：类型与连接参数统一由 admin/db_config.py 解析
+    # （既支持 ADMIN_DATABASE_URL 显式连接串，也支持 ADMIN_DB_TYPE + 分项参数），
+    # 这里只做一处透出，业务代码仍像以前一样用 settings.DATABASE_URL。
+    DB_CONFIG = db_config
+    DB_TYPE = db_config.type          # mysql | db2
+    DATABASE_URL = db_config.url
     REDIS_URL = os.getenv("ADMIN_REDIS_URL", "redis://127.0.0.1:6379/0")
 
     # 后端（CodeBuddy / WorkBuddy）

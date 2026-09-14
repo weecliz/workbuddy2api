@@ -12,12 +12,98 @@
 
 ---
 
-## [未发布]
+## [2026-09-14]
 
-下次发布前，把改动累积在这一节；发布时改写成当天的日期标题。
+### 新增
+
+- **数据库可插拔：新增 IBM Db2 与 SQLite 支持，默认库改为 SQLite**。
+  原先只支持 MySQL（pymysql）且连接参数写死在 `admin/config.py`。现拆成三层：
+  - `admin/db_config.py`（配置中心）：全项目唯一的「数据库类型 + 连接参数」定义处。
+    取值优先级 `ADMIN_DATABASE_URL`（显式连接串，兼容旧部署）>
+    `ADMIN_DB_TYPE` + 分项参数（`ADMIN_DB_HOST/PORT/USER/PASSWORD/NAME/SCHEMA/OPTIONS`）>
+    `DEFAULT_DB_TYPE`。连接池也可配（`ADMIN_DB_POOL_SIZE` / `MAX_OVERFLOW` / `POOL_TIMEOUT` /
+    `POOL_RECYCLE` / `CONNECT_TIMEOUT` / `AUTO_CREATE` / `ECHO`）。
+    自检命令 `python -m admin.db_config`（密码打码）。用户名 / 密码 / 库名均做 URL 转义
+  - `admin/db_dialect.py`（方言层）：抹平 URL scheme、默认端口、标识符引用符（反引号 vs 双引号）、
+    类型映射（`DATETIME`→`TIMESTAMP`、`TEXT`→`CLOB`）、系统表查询、能否自动建库 / 建 schema、
+    系统表标识符大小写、是否文件库。新增一种数据库只需在此登记一条 `DbDialect`
+  - `admin/db.py`：按方言准备「库 / schema / 数据文件目录」，并让增量补列支持跨方言
+- **启动命令可直接指定数据库**：`main.py` 新增 `--db-type` / `--db-host` / `--db-port` /
+  `--db-user` / `--db-password` / `--db-name` / `--db-schema` / `--db-options` /
+  `--list-db-types`。优先级高于 `.env`，只影响本次进程，不回写配置文件；
+  显式给 `--db-type` 时会忽略 `.env` 的 `ADMIN_DATABASE_URL`（避免整串 URL 顶掉分项参数）
+- **`scripts/db_probe.py`**：启动前数据库自检（批处理共用）。退出码
+  `0` 正常 / `2` 主机端口连不上 / `3` 驱动未安装 / `4` 配置有误。
+  `start_admin.bat` 与 `install_service.bat` 改用它对症自检，不再是写死的 `import pymysql`
+- **`docs/DB_SUPPORT.md`**：三种数据库的配置方式、类型映射对照表、DB2 建库与页大小要求、
+  常见报错（`SQLSTATE 54010` 行长超限 / `42710` 对象已存在 / `SQLSTATE 30081N` 连不上）、
+  以及新增方言的接入步骤
+- `start_admin.bat` 横幅新增 `database : <类型>` 回显（`--db-type` 的
+  `--db-type sqlite` 与 `--db-type=sqlite` 两种写法都识别），启动日志也回显生效配置
+- **`scripts/stop_admin.bat`：一键停止脚本**（与 `start_admin.bat` 配套）。
+  按端口找到实际持有 socket 的进程，再双向遍历进程树后优雅关闭。因为本服务是
+  `main.py → uvicorn` 的父子结构，**只杀父进程会把子进程连同端口一起留下**，反过来
+  只杀持端口的 uvicorn 又会留下 `main.py` 孤儿，所以必须两头都收。
+  支持 `--port N`（默认 8790 或 `ADMIN_PORT`）、`--force`（跳过优雅阶段直接强杀）、
+  `--list`（只列出占用进程不执行停止）、`--help`
+- **`scripts/_proc_tree.ps1`**：`stop_admin.bat` 的进程树查询辅助，`-Mode descendants`
+  取后代（深到浅）、`-Mode ancestors` 取祖先链；祖先遍历在遇到**非 python 父进程时即停**，
+  避免顺着 `explorer.exe` 一路往上把用户自己的终端/编辑器也杀掉
+
+### 变更
+
+- **默认数据库由 MySQL 改为 SQLite**（`DEFAULT_DB_TYPE = "sqlite"`）。
+  零依赖、无需安装数据库服务，克隆下来 `python main.py` 直接就能跑，
+  数据落在 `./data/workbuddy_admin.db`。`.env` 与 `.env.example` 也改为 SQLite 生效、
+  MySQL / DB2 两段保留为注释块（启用即切换）。
+  **生产环境请在 `.env` 里显式写 `ADMIN_DB_TYPE`，不要依赖兜底值**
+- **依赖自检按方言走**：选 `sqlite` 不再要求安装 `pymysql`，选 `db2` 才要求 `ibm_db_sa`
+- `admin/models.py` 长文本列改为跨方言写法：`Text` → `Text().with_variant(CLOB(), "db2", "ibm_db_sa")`；
+  `api_keys.key_full`（`VARCHAR(2048)`）在 DB2 上改用 `CLOB`——该列只用于后台展示、不参与查询条件，
+  而 2048 字节的 VARCHAR 在 DB2 默认 4K 页下易触发行长超限（`SQLSTATE 54010`）
+- `admin/config.py` 不再写死连接串，改为透出配置中心的解析结果（`DATABASE_URL` 用法保持不变）
+- `service_admin.py` 的 Windows 服务依赖名按数据库类型推断（mysql → `MySQL84`、db2 → `DB2-0`、
+  sqlite → 不声明），`ADMIN_DB_SERVICE_NAME` 可覆盖
+- `.gitignore` 忽略 `data/` 与 `*.db` / `*.db-journal` / `*.db-wal` / `*.db-shm` / `*.sqlite*`
+- `requirements.txt` 注明驱动三选一：`pymysql`（MySQL）/ `ibm_db_sa`（DB2）/ 无需安装（SQLite）
 
 ### 修复
 
+- **日志里的 emoji 会打断启动**：`main.py` 的 `_log` 直接 `print` 含 `⚠️` / `❌` 的文案，
+  在 Windows 默认的 GBK 控制台下抛 `UnicodeEncodeError`（`'gbk' codec can't encode character '\u26a0'`），
+  把启动流程整个打断——只要终端是 GBK 且走到了「默认弱口令 / 弱密钥」告警分支就会复现。
+  现改为编码降级写入：先正常打印，编码不支持时替换为可用字符，再不行则忽略，
+  确保「日志打不出来」绝不影响启动
+- **补列迁移在非 MySQL 方言下会失败**：`_ensure_column` 原先写死 MySQL 的
+  `INFORMATION_SCHEMA.COLUMNS` 查询与 `TINYINT/DATETIME` 等类型名，DB2 下静默失效。
+  现改为按方言查系统表（DB2 走 `SYSCAT.COLUMNS`、SQLite 走 `PRAGMA_TABLE_INFO`），
+  类型优先从 ORM 模型编译取得（保证「建表」与「补列」得到同一类型），
+  并自动省略 DB2 LOB 类型不支持的 `DEFAULT` 子句
+- `create_engine` 在无 `connect_args` 时传 `None` 会抛 `ConnectArgumentsNotSupported`
+  （SQLAlchemy 2.0），改为条件性传入
+- 驱动未安装时 `create_engine` 抛的是 `NoSuchModuleError` 而非 `ModuleNotFoundError`，
+  原先的捕获漏了这一类，现两类都兜并给出确切的 `pip install` 提示
+- `start_admin.bat` 横幅识别不出 `--db-type`：批处理 `for` 块内 `%PREV%` 是**解析期**展开的，
+  「前一个参数」的写法必须 `setlocal EnableDelayedExpansion` 配合 `!PREV!`。
+  同时 `if "%ERRORLEVEL%"=="N"` 写在括号块内同样是解析期展开、永远是旧值，
+  必须改用裸的 `if errorlevel N` 形式。两处均已修正（否则 `--db-type db2` 时仍会报「ready」而不是「驱动缺失」）
+- **`start_admin.bat` 横幅显示的数据库类型与实际启动的不一致**：横幅只读进程环境变量里的
+  `ADMIN_DB_TYPE`，从不读 `.env`，于是 `.env` 里写的 `sqlite` 被无视、横幅恒显示兜底的 `mysql`。
+  现按与 `main.py` 相同的优先级解析：命令行 `--db-type` > 环境变量 > `.env` > `DEFAULT_DB_TYPE`。
+  解析 `.env` 时用 `eol=#` 跳过整行注释，并按「后出现的有效行覆盖先出现的」处理重复声明
+  （`.env` 里通常是「1 个生效行 + 若干注释掉的备选行」），行内注释与引号也会被剥掉
+- **`python main.py` 报「缺少依赖」但项目 `.venv` 其实是好的**：`start_admin.bat` 定位解释器时
+  先执行 `where python` 再找项目 venv，导致 PATH 上的裸系统 Python（没装 fastapi/sqlalchemy）抢先命中。
+  现调整顺序为「项目 venv → 其他已知位置 → PATH」，并在注释里说明为何顺序不能反
+- **`install_service.bat` / `uninstall_service.bat` / `start_converter.bat` 也会挑错解释器**：
+  与 `start_admin.bat` 同一个缺陷（`where python` 排在项目 venv 之前），三个脚本一起调整了顺序
+- **Ctrl+C 停止服务时被误报成崩溃**：`main.py` 被中断退出码是 `-1`（或窗口关闭的 `-1073741510`），
+  但 `start_admin.bat` 把任何非 0 退出码都当成失败，打出一大段 `Common causes` 排错提示，
+  让人以为服务挂了——实际上那正是前台运行的**正常**停止方式，日志里也早已 `Application startup complete`。
+  现在这两种退出码单独识别为「Stopped (interrupted)」，不再误报；
+  同时那段排错提示本身也过时了（还在写「MySQL not running」、只提 `ADMIN_DATABASE_URL`），
+  改为按当前方言（sqlite / mysql / db2）给出各自可能的原因，并附上
+  `python -m admin.db_config` 与 `python scripts\db_probe.py` 两条自查命令
 - **Claude Code 多轮工具调用后报 `11148 tool calls and tool results do not match`**：
   `anthropic_adapter._convert_anthropic_message` 处理 user 消息时，若同一条消息里同时
   含 `tool_result` 与文本块（Claude Code 常附带的 `<system-reminder>`），原实现用
@@ -141,11 +227,12 @@
 
 ## 怎么维护这份日志
 
-1. **什么时候写**：每次合并一个有意义的功能 / 修复 / 重构，就往顶部 `[未发布]` 里加一行。
+1. **什么时候写**：每次合并一个有意义的功能 / 修复 / 重构，就往顶部当前日期那一节里加一行。
    不要等到发版时再回忆——那时候最容易漏。
 2. **写给谁看**：用户和未来的自己。写"变了什么、为什么变"，不要只贴 commit 标题。
    例如不写「改 proxy」，而写「五个端点的重试循环收敛为一份，新增端点不用再复制重试逻辑」。
-3. **发布时**：把 `[未发布]` 改名成当天日期，再新建一节空的 `[未发布]`。
+3. **换天时**：新的一天就在最上面加一节 `## [YYYY-MM-DD]`，当天的改动都累积在这一节里
+   （同一天既有新增又有修复时，用 `### 新增` / `### 变更` / `### 修复` / `### 安全` 分子节）。
 4. **不确定归哪类**：影响用户可感知行为 → 变更；修坏了的东西 → 修复；全新的东西 → 新增；
    涉及凭据 / 权限 / 泄露 → 安全。
 5. **辅助生成**：`git log --format="%ad | %s" --date=short` 可以列出日期与提交标题，

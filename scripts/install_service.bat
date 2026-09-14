@@ -45,16 +45,20 @@ if not exist "service_admin.py" (
 )
 
 rem ---------- 2. locate python ----------
+rem Order matters: the project's own venv must win over whatever `python` happens
+rem to be on PATH, otherwise a bare system interpreter (without pywin32 etc.)
+rem gets picked and the script fails for no good reason.
 set "PY="
 if defined CONVERTER_PYTHON set "PY=%CONVERTER_PYTHON%"
-
-if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY set "PY=%%W"
 
 if not defined PY for %%P in (
     "%~dp0..\.venv\Scripts\python.exe"
     "%~dp0..\venv\Scripts\python.exe"
+    "%~dp0..\env\Scripts\python.exe"
     "%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
 ) do if not defined PY if exist %%P set "PY=%%~P"
+
+if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY set "PY=%%W"
 
 if not defined PY (
     echo [ERROR] No usable Python interpreter found.
@@ -66,7 +70,9 @@ if not defined PY (
 echo [1/4] interpreter : %PY%
 
 rem ---------- 3. runtime dependencies ----------
-"%PY%" -c "import fastapi, uvicorn, httpx, sqlalchemy, pymysql, jwt, dotenv" 1>nul 2>nul
+rem The DB driver is not hard-coded here: it depends on ADMIN_DB_TYPE in .env
+rem   mysql -> pymysql, db2 -> ibm_db_sa, sqlite -> nothing (stdlib).
+"%PY%" -c "import fastapi, uvicorn, httpx, sqlalchemy, jwt, dotenv" 1>nul 2>nul
 if errorlevel 1 (
     echo.
     echo [ERROR] This interpreter is missing runtime dependencies.
@@ -75,6 +81,19 @@ if errorlevel 1 (
     echo            "%PY%" -m pip install -r requirements.txt
     echo.
     echo         Or set CONVERTER_PYTHON to an interpreter that has them.
+    echo.
+    pause
+    exit /b 2
+)
+rem A Windows service has to declare the DB it depends on; check the driver now.
+rem NOTE: use the bare `if errorlevel N` form - inside a parenthesised block
+rem %ERRORLEVEL% would be expanded at parse time and stay stale.
+"%PY%" "%~dp0db_probe.py" 1>nul 2>nul
+if errorlevel 3 (
+    echo.
+    echo [ERROR] The database driver required by ADMIN_DB_TYPE is not installed.
+    echo.
+    "%PY%" "%~dp0db_probe.py"
     echo.
     pause
     exit /b 2

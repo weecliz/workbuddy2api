@@ -1,9 +1,17 @@
 """ORM 模型：账号、API Key、用量日志。"""
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import CLOB, Column, DateTime, Float, Integer, String, Text
 
 from admin.db import Base
+
+# 长文本列的跨方言写法：MySQL 保持原语义，DB2 编译成 CLOB。
+#   1) DB2 没有 MySQL 的 TEXT 类型，显式指定更稳；
+#   2) key_full 这种 VARCHAR(2048) 在 DB2 默认 4K 页里容易触发「行长超限」(SQLSTATE 54010)，
+#      它在业务里只用于后台展示、从不参与查询条件，因此 DB2 上改成 CLOB 最省事。
+# ibm_db_sa 同时以 db2 / ibm_db_sa 两个 dialect 名注册，两个都登记。
+TextColumn = Text().with_variant(CLOB(), "db2", "ibm_db_sa")
+KeyFullColumn = String(2048).with_variant(CLOB(), "db2", "ibm_db_sa")
 
 
 class Account(Base):
@@ -16,7 +24,7 @@ class Account(Base):
     uid = Column(String(120), default="")
     enterprise_id = Column(String(120), default="")
     domain = Column(String(120), default="")
-    auth_json = Column(Text, nullable=False)  # 原始 .info 内容（含 token）
+    auth_json = Column(TextColumn, nullable=False)  # 原始 .info 内容（含 token）
     status = Column(String(16), default="active")  # active | disabled
     balance_total = Column(Integer, default=0)
     balance_remain = Column(Integer, default=0)
@@ -44,7 +52,7 @@ class ApiKey(Base):
     name = Column(String(120), default="")
     key_hash = Column(String(128), unique=True, nullable=False)
     key_prefix = Column(String(16), default="")  # 展示用前缀
-    key_full = Column(String(2048), default="")  # 完整密钥（仅管理后台查看用，base64 编码存储）
+    key_full = Column(KeyFullColumn, default="")  # 完整密钥（仅管理后台查看用，base64 编码存储）
     credit_limit = Column(Float, default=0)  # 限额（credits）；unlimited=True 时忽略
     credit_used = Column(Float, default=0)
     unlimited = Column(Integer, default=0)  # 0/1
@@ -108,7 +116,7 @@ class SystemSetting(Base):
     __tablename__ = "system_settings"
 
     key = Column(String(120), primary_key=True)
-    value = Column(Text, default="")
+    value = Column(TextColumn, default="")
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
@@ -124,7 +132,7 @@ class Schedule(Base):
     enabled = Column(Integer, default=1)  # 0/1
     last_run_at = Column(DateTime, nullable=True)
     next_run_at = Column(DateTime, nullable=True)
-    last_result = Column(Text, default="")  # 上次运行结果摘要
+    last_result = Column(TextColumn, default="")  # 上次运行结果摘要
     # 停止领取时间（仅 daily_checkin 任务使用）：到达该时间后不再执行领取请求，
     # 避免活动下线后继续请求触发上游风控。可由活动 end_time 预填或运行中发现 EventEnded 自动写入。
     stop_after = Column(DateTime, nullable=True)
