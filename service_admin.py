@@ -101,9 +101,25 @@ SVC_DESC = (
     "单进程单端口，提供 /admin、/v1/*（Key 配额网关）、/gw/*（桌面登录态网关）。"
 )
 
-# 依赖的数据库服务名。换机器请用下面命令查实际名字后改这里：
-#     Get-Service | Where-Object Name -match mysql
-DEPEND_SERVICE = "MySQL84"
+# 依赖的数据库服务名（Windows 服务依赖，保证开机时数据库先起来）。
+# 默认按 ADMIN_DB_TYPE 自动选；对不上就用 .env 里的 ADMIN_DB_SERVICE_NAME 覆盖：
+#     ADMIN_DB_SERVICE_NAME=MySQL84 / DB2-0 / your-service-name
+# 查实际服务名：Get-Service | Where-Object Name -match 'mysql|db2'
+# SQLite 是本地文件，没有对应服务，返回空串表示不声明依赖。
+def _resolve_depend_service() -> str:
+    override = os.getenv("ADMIN_DB_SERVICE_NAME", "").strip()
+    if override:
+        return override
+    try:
+        from admin.db_config import db_config
+        if db_config.dialect.file_based:
+            return ""
+        return "DB2-0" if db_config.type == "db2" else "MySQL84"
+    except Exception:
+        return ""  # 读不到配置时按默认方言（sqlite）处理：它没有对应服务
+
+
+DEPEND_SERVICE = _resolve_depend_service()
 
 HOST_FALLBACK = "0.0.0.0"
 PORT_FALLBACK = 8790
@@ -329,7 +345,7 @@ def _state_text(code) -> str:
     }.get(code, str(code))
 
 
-def _mysql_service_exists(name: str) -> bool:
+def _service_exists(name: str) -> bool:
     try:
         win32serviceutil.QueryServiceStatus(name)
         return True
@@ -481,11 +497,13 @@ def _install() -> int:
         return 5
 
     deps = None
-    if _mysql_service_exists(DEPEND_SERVICE):
+    if not DEPEND_SERVICE:
+        print("[info] 当前数据库类型无对应 Windows 服务（如 SQLite 文件库），不声明服务依赖。")
+    elif _service_exists(DEPEND_SERVICE):
         deps = [DEPEND_SERVICE]
     else:
         print(f"[warn] 未找到服务 {DEPEND_SERVICE}，本次不声明服务依赖。")
-        print("       这意味着开机时本服务可能先于 MySQL 启动而失败重启。")
+        print("       这意味着开机时本服务可能先于数据库启动而失败重启。")
 
     exe_args = f'"{SCRIPT}"'
     try:

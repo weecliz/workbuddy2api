@@ -20,7 +20,23 @@
     body{ font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; background:var(--wb-bg); color:#2b2f33; }
     .fade-in{ animation:fade .22s ease; }
     @keyframes fade{ from{opacity:0;transform:translateY(6px);} to{opacity:1;transform:none;} }
-    .toast{ position:fixed; right:16px; bottom:16px; z-index:60; }
+    .toast{ position:fixed; right:24px; bottom:24px; z-index:60; pointer-events:none; }
+    /* 提示条：白底 + 左侧色条 + 淡阴影，比原来的整块纯色更耐看，
+       也不会在深色内容上糊成一团。pointer-events 留给内部按钮用。 */
+    .toast-item{
+      pointer-events:auto; display:flex; align-items:flex-start; gap:10px;
+      min-width:220px; max-width:380px; padding:11px 14px 11px 12px;
+      background:#fff; border:1px solid var(--wb-border); border-left:3px solid var(--wb-primary);
+      border-radius:.7rem; box-shadow:0 6px 22px rgba(17,24,39,.10),0 1px 3px rgba(17,24,39,.06);
+      font-size:13px; line-height:1.5; color:#2b2f33; word-break:break-word;
+      animation:toast-in .26s cubic-bezier(.22,1,.36,1);
+    }
+    .toast-item.is-err{ border-left-color:#ef4444; }
+    .toast-item.is-out{ animation:toast-out .2s ease forwards; }
+    .toast-item > i{ margin-top:2px; font-size:13px; flex:none; color:var(--wb-primary); }
+    .toast-item.is-err > i{ color:#ef4444; }
+    @keyframes toast-in{ from{opacity:0;transform:translateY(10px) scale(.98);} to{opacity:1;transform:none;} }
+    @keyframes toast-out{ to{opacity:0;transform:translateX(12px) scale(.98);} }
     .modal-overlay{ background:rgba(15,23,42,.45); backdrop-filter:blur(2px); }
     pre{ white-space:pre-wrap; word-break:break-all; }
     .bg-wb{ background:var(--wb-grad); }
@@ -368,13 +384,29 @@ async function safeJson(r) {
   try { return { ok: r.ok, status: r.status, data: t ? JSON.parse(t) : {} }; }
   catch (e) { return { ok: false, status: r.status, data: { detail: t || ("HTTP " + r.status), _parse_error: true } }; }
 }
+/* 提示条：白底卡片 + 左侧色条 + 图标，右侧淡入淡出。
+   msg 允许传 HTML（调用方常带 <code>/<b>），沿用原行为不做转义。 */
 function toast(msg, type = "ok") {
-  const c = type === "ok" ? "bg-emerald-600" : "bg-red-600";
+  const isErr = type !== "ok";
+  const box = $("#toasts");
   const el = document.createElement("div");
-  el.className = `text-white text-sm px-4 py-2 rounded-lg shadow ${c} fade-in`;
-  el.innerHTML = msg;
-  $("#toasts").appendChild(el);
-  setTimeout(() => el.remove(), 3200);
+  el.className = "toast-item" + (isErr ? " is-err" : "");
+  el.innerHTML = `<i class="fa-solid ${isErr ? "fa-circle-exclamation" : "fa-circle-check"}"></i><div>${msg}</div>`;
+  box.appendChild(el);
+
+  // 最多留 4 条，多了把最早的挤掉，避免刷屏时糊满整屏
+  while (box.children.length > 4) box.removeChild(box.firstElementChild);
+
+  const life = isErr ? 4600 : 3000;   // 出错信息多留一会儿，方便看清
+  let timer = null;
+  const dismiss = () => {
+    if (timer) { clearTimeout(timer); timer = null; }
+    el.classList.add("is-out");
+    el.addEventListener("animationend", () => el.remove(), { once: true });
+    setTimeout(() => el.remove(), 400);   // 兜底：动画被打断也要清理
+  };
+  el.addEventListener("click", dismiss);  // 点一下可提前关掉
+  timer = setTimeout(dismiss, life);
 }
 /* 模态框 + 清理钩子：需要轮询/定时器的弹窗把 clearInterval 之类的收尾函数
    注册到 _modalCleanups，关闭（含点遮罩、按 Esc）时会统一执行，避免定时器泄漏。 */
@@ -1225,10 +1257,14 @@ async function toggleModel(id, enabled){
 }
 async function deleteModelConfig(id){ if(!confirm("确认移除该模型配置？移除后该模型将被过滤。"))return; const r=await api("/api/models/"+id,{method:"DELETE"}); toast(r.ok?"已移除":"失败",r.ok?"ok":"err"); if(r.ok) loadModels(); }
 async function enableAllModels(enabled){
+  if(!confirm(`确认${enabled?'启用':'禁用'}当前全部模型？`)) return;
   const r = await api("/api/models/batch-toggle",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({enabled,level:"system"})});
   const d = await r.json().catch(()=>({}));
-  toast(`${enabled?'启用':'禁用'}了 ${d.updated||0} 个模型`, r.ok?"ok":"err");
-  if(r.ok) loadModels();
+  if(!r.ok){ toast(`${enabled?'启用':'禁用'}失败: ${esc(d.detail||"")}`,"err"); return; }
+  const n = d.updated || 0;
+  // n=0 是有意义的信息（本来就已经是目标状态），单独提示，避免看起来像"点了没反应"
+  toast(n ? `已${enabled?'启用':'禁用'} ${n} 个模型` : `全部模型已处于${enabled?'启用':'禁用'}状态，无需变更`, "ok");
+  loadModels();
 }
 async function speedTestModel(modelId, btn){
   if(btn && btn.disabled) return;

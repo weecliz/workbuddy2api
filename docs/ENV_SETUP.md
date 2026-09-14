@@ -38,9 +38,29 @@ python -c "import secrets;print(secrets.token_hex(32))"
 
 ## 变量清单
 
+### 数据库（类型 + 连接参数）
+
+数据库配置统一由 `admin/db_config.py` 解析：既支持 `ADMIN_DB_TYPE` + 分项参数，
+也支持旧的 `ADMIN_DATABASE_URL` 显式连接串（优先级更高）。详见 [DB_SUPPORT.md](DB_SUPPORT.md)。
+
 | 变量 | 说明 | 生产必填 |
 | --- | --- | --- |
-| `ADMIN_DATABASE_URL` | MySQL 连接串（含密码） | ✅ |
+| `ADMIN_DB_TYPE` | 数据库类型：`mysql` \| `db2` \| `sqlite` | |
+| `ADMIN_DB_HOST` / `ADMIN_DB_PORT` | 地址 / 端口（留空用该类型默认值；SQLite 忽略） | |
+| `ADMIN_DB_USER` / `ADMIN_DB_PASSWORD` | 账号 / 密码（SQLite 忽略） | ✅ |
+| `ADMIN_DB_NAME` | 库名（DB2 为已存在的数据库名）；**SQLite 时为数据文件路径** | ✅ |
+| `ADMIN_DB_SCHEMA` | DB2 专用目标 schema；MySQL / SQLite 忽略 | |
+| `ADMIN_DB_OPTIONS` | 方言原生参数串，如 `charset=utf8mb4`（SQLite 忽略） | |
+| `ADMIN_DATABASE_URL` | 显式连接串（可选，优先级最高） | |
+| `ADMIN_DB_AUTO_CREATE` | `0` = 启动时不自动建库 / 建 schema / 建数据文件目录 | |
+| `ADMIN_DB_POOL_*` / `ADMIN_DB_CONNECT_TIMEOUT` / `ADMIN_DB_ECHO` | 连接池与调试开关 | |
+
+自检当前生效配置（密码会打码）：`python -m admin.db_config`
+
+### 其余变量
+
+| 变量 | 说明 | 生产必填 |
+| --- | --- | --- |
 | `ADMIN_REDIS_URL` | Redis 连接串 | |
 | `ADMIN_BACKEND` | 上游网关地址 | |
 | `ADMIN_CLIENT_AUTH_DIR` | 桌面端登录态目录 | |

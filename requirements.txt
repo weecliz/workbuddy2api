@@ -3,7 +3,12 @@ uvicorn[standard]
 httpx
 # 管理后台（多账号反代 + API Key 网关）
 sqlalchemy>=2.0
+# 数据库驱动按 ADMIN_DB_TYPE 三选一（其余不装也能正常跑）：
+#   mysql  → pymysql
+#   db2    → ibm_db_sa（SQLAlchemy 的 DB2 方言，会顺带装上原生驱动 ibm_db）
+#   sqlite → 无需安装（sqlite3 是 Python 标准库）
 pymysql
+# ibm_db_sa>=0.4.0
 redis
 python-multipart
 PyJWT

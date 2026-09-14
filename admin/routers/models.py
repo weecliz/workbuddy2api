@@ -28,6 +28,8 @@ class ModelToggleIn(BaseModel):
 
 
 class ModelBatchIn(BaseModel):
+    # 留空 = 该 level 下的全部模型（前端「全部启用 / 全部禁用」按钮就是不带
+    # model_ids 调用的）；给了具体列表则只更新这些模型。
     model_ids: list[str] = []
     enabled: bool = True
     level: str = "system"  # system | user
@@ -188,17 +190,26 @@ def batch_toggle(
     _: bool = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """批量启用/禁用模型。"""
+    """批量启用/禁用模型。
+
+    body.model_ids 为空时作用于该 level 下的全部模型（「全部启用 / 全部禁用」按钮
+    走的就是这条路）；给了列表则只更新列表内的模型。
+
+    历史坑：这里原先只按 model_ids 循环，而前端按钮从不传该字段，导致循环体一次
+    都不执行、恒返回 updated=0 —— 按钮点了没反应，但 HTTP 是 200，很难被发现。
+    """
+    q = db.query(ModelConfig).filter(ModelConfig.level == body.level)
+    if body.model_ids:
+        q = q.filter(ModelConfig.model_id.in_(body.model_ids))
+
+    target = 1 if body.enabled else 0
     count = 0
-    for mid in body.model_ids:
-        mc = db.query(ModelConfig).filter(
-            ModelConfig.model_id == mid, ModelConfig.level == body.level
-        ).first()
-        if mc:
-            mc.enabled = 1 if body.enabled else 0
+    for mc in q.all():
+        if mc.enabled != target:
+            mc.enabled = target
             count += 1
     db.commit()
-    return {"updated": count, "enabled": body.enabled}
+    return {"updated": count, "enabled": body.enabled, "level": body.level}
 
 
 @router.delete("/{config_id}")
