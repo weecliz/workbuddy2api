@@ -63,6 +63,20 @@
   `tailwind.min.js`（Play CDN 3.0.0 构建）与 FontAwesome 6.5.2（CSS + woff2），
   后台在内网 / 离线 / 代理异常环境下均正常渲染，也不再向第三方发出请求
 
+### 文档
+
+- **新增 `AGENTS.md` 作为跨 AI 工具的规则单一真相源**：此前项目约定只散落在
+  `README.md` 与 `CHANGELOG.md` 里，AI 编程工具打开仓库时读不到精简的项目上下文，
+  容易重复踩已知的坑（如把 11128 内容审核误判为渠道故障）。新增根目录 `AGENTS.md`，
+  涵盖项目定位、技术栈、常用命令、代码结构、提交与日志约定、API 契约（两套鉴权与
+  base_url 写法）、已知坑位与禁止事项。该文件对外公开，不含凭据、代理端口与本机路径。
+- **新增 `CLAUDE.md` / `GEMINI.md` 两个桥接文件**：Claude Code 只读 `CLAUDE.md`、
+  Gemini CLI 只读 `GEMINI.md`，二者均不读 `AGENTS.md`。桥接文件各自只有一行
+  `@AGENTS.md` 导入语法（启动时把 `AGENTS.md` 展开进上下文）加说明注释，避免内容
+  各写一遍而漂移。刻意**不**创建 `CODEBUDDY.md`：CodeBuddy 的逻辑是「根目录存在
+  `CODEBUDDY.md` 就不读 `AGENTS.md`」，创建反而会破坏其自动回退；同理不建
+  `QWEN.md`（Qwen Code 已原生加载 `AGENTS.md`，建了会重复加载）
+
 ---
 
 ## [2026-09-12]
