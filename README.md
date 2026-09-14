@@ -206,7 +206,7 @@ WORKBUDDY_VERSION              # 默认 2.0.0
 ### 3.3 技术栈
 
 - 后端：**FastAPI + SQLAlchemy 2.0 + MySQL 8（pymysql）+ Redis**
-- 前端：**纯 HTML + TailwindCSS + FontAwesome**（CDN，无需构建），单页管理后台
+- 前端：**纯 HTML + TailwindCSS + FontAwesome**（依赖随仓库放在 `admin/static/vendor/`，无需构建、无需外网），单页管理后台
 - 鉴权：后台 JWT（HS256）；代理 API Key 用 SHA-256 存储，明文仅创建时展示一次
 
 ### 3.4 路由总览

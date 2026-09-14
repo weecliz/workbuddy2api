@@ -16,6 +16,34 @@
 
 下次发布前，把改动累积在这一节；发布时改写成当天的日期标题。
 
+### 修复
+
+- **网关假死自愈（监听器看门狗）**：Windows 上 asyncio 的 Proactor 事件循环遇到并发
+  `accept` 出错时，会关闭监听 socket 且不再重新 accept（`proactor_events.py:863-870`）。
+  结果是**进程活着、服务状态仍是 RUNNING、但再也接不到任何连接**。SCM 看不到进程退出，
+  失败恢复策略因此不会触发——实测该状态下网关挂了 11 分钟、期间零请求：
+  日志有 `Accept failed on a socket` / `OSError: [WinError 64]`，之后服务完全静默。
+  现增加看门狗线程：每 `ADMIN_WATCHDOG_INTERVAL`（默认 20s）对 `GET /gw/health`
+  发起真实 TCP 探活，连续 `ADMIN_WATCHDOG_FAILURES`（默认 3）次失败即记录诊断并
+  主动退出进程，交由服务管理器在 5s 内拉起一个全新监听器
+- **失败恢复策略其实从未生效**：`service_admin.py install` 会打印「5 秒自动重启」，
+  但 SCM 侧实际为空（实测 `Actions = ()`、`ResetPeriod = 0`），所以进程真崩溃也不会
+  被拉起。现在服务每次启动自检该配置并补写（服务以 LocalSystem 运行，有权限改自己），
+  `service_admin.py status` 也改为如实显示配置状态，不再假定成功
+- **真实积分回写不再「每请求一线程」**：`_fetch_real_credits` 原先对每个估算请求起一个
+  `threading.Thread` 并在其中 `sleep(60)`，等于「每请求占一个线程 60 秒」。一旦上游开始
+  不回传 `credit` 字段，QPS 上到两位数就是几百个并发线程。改为有界队列（2048）+ 单
+  worker：worker 按最早到期时间休眠后逐条回写，队列满则丢弃并告警——估算值本身已落库，
+  回写只是把估算修正为真实值，丢一条不影响记账
+- **`service_admin.py status` 改用真实 HTTP 探活**：原先只做 TCP connect，假死状态下
+  会误判为健康；现在会明确报出「无响应 —— 疑似假死」
+- **后台页面依赖全部本地化**：`/admin` 原先从 `cdn.tailwindcss.com` 与 `cdn.jsdelivr.net`
+  拉 Tailwind 与 FontAwesome。一旦机器无外网出口、或系统代理（如 `127.0.0.1:10808`）未开，
+  两个请求双双 `ERR_PROXY_CONNECTION_FAILED`，页面退化成无样式裸 HTML——登录框掉进页头、
+  统计卡片竖排、Tab 与表格全部走形。现改为引用仓库内 `admin/static/vendor/` 的
+  `tailwind.min.js`（Play CDN 3.0.0 构建）与 FontAwesome 6.5.2（CSS + woff2），
+  后台在内网 / 离线 / 代理异常环境下均正常渲染，也不再向第三方发出请求
+
 ---
 
 ## [2026-09-12]
