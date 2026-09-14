@@ -130,8 +130,13 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
                         b.get("text", "") for b in output if isinstance(b, dict) and b.get("type") == "text"
                     )
                 result.append({"role": "tool", "tool_call_id": tc_id, "content": output})
-        if text_parts:
-            result.insert(0, {"role": "user", "content": "".join(text_parts)})
+        # 注意顺序：tool_result 必须紧跟在带 tool_calls 的 assistant 之后（OpenAI 协议要求），
+        # 因此同一条 user 消息里夹带的文本（如 Claude Code 的 <system-reminder>）只能放到
+        # tool 消息【之后】，否则会变成 assistant(tool_calls) → user → tool，触发后端
+        # "tool calls and tool results do not match"（code 11148）。
+        joined_text = "".join(text_parts)
+        if joined_text:
+            result.append({"role": "user", "content": joined_text})
         return result
 
     # assistant 角色

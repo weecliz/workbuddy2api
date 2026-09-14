@@ -18,6 +18,16 @@
 
 ### 修复
 
+- **Claude Code 多轮工具调用后报 `11148 tool calls and tool results do not match`**：
+  `anthropic_adapter._convert_anthropic_message` 处理 user 消息时，若同一条消息里同时
+  含 `tool_result` 与文本块（Claude Code 常附带的 `<system-reminder>`），原实现用
+  `insert(0, ...)` 把文本插到 tool 消息前面，转换后的序列变成
+  `assistant(tool_calls) → user(文本) → tool`，破坏 OpenAI 协议要求的「带 tool_calls 的
+  assistant 后必须紧跟 role=tool」约束，腾讯后端据此判定序列断裂并整条拒绝。一旦对话历史
+  累积出这种消息，之后每轮请求都会带着坏结构重发，故表现为「前几个任务正常、第 3 个开始
+  报错、点继续一直报同一个错」。改为把夹带文本放到 tool 消息之后（语义上用户的话本就在
+  工具结果之后），并跳过空文本，序列恢复为 `assistant(tool_calls) → tool → user`。补
+  `tests/test_anthropic_adapter.py` 锁定该顺序
 - **网关假死自愈（监听器看门狗）**：Windows 上 asyncio 的 Proactor 事件循环遇到并发
   `accept` 出错时，会关闭监听 socket 且不再重新 accept（`proactor_events.py:863-870`）。
   结果是**进程活着、服务状态仍是 RUNNING、但再也接不到任何连接**。SCM 看不到进程退出，
