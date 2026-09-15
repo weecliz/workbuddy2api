@@ -37,20 +37,24 @@ if not exist "service_admin.py" (
 )
 
 rem ---------- 2. locate python ----------
-rem Order matters: the project's own venv must win over whatever `python` happens
-rem to be on PATH, otherwise a bare system interpreter (without pywin32 etc.)
-rem gets picked and the script fails for no good reason.
+rem Order matters: a python on the Windows PATH wins over the project venv.
+rem That is deliberate - the machine's configured interpreter is treated as the
+rem source of truth. The checks below keep this safe: a PATH interpreter missing
+rem the runtime packages (or pywin32) is reported with the exact fix instead of
+rem producing a half-installed service.
 set "PY="
 if defined CONVERTER_PYTHON set "PY=%CONVERTER_PYTHON%"
 
+rem 2a. first python on the Windows PATH (Windows environment variable)
+if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY set "PY=%%W"
+
+rem 2b. project venv and the WorkBuddy bundled interpreter
 if not defined PY for %%P in (
     "%~dp0..\.venv\Scripts\python.exe"
     "%~dp0..\venv\Scripts\python.exe"
     "%~dp0..\env\Scripts\python.exe"
     "%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
 ) do if not defined PY if exist %%P set "PY=%%~P"
-
-if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY set "PY=%%W"
 
 if not defined PY (
     echo [ERROR] No usable Python interpreter found.

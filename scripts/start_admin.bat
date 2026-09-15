@@ -133,27 +133,28 @@ if not exist ".env" (
 )
 
 rem ---------- 2. locate python ----------
-rem Order matters: the project's own venv must win over whatever `python` happens
-rem to be on PATH. Scanning PATH first used to pick the bare system interpreter
-rem (which lacks fastapi/sqlalchemy), so the bat reported "missing dependencies"
-rem even though .venv was sitting right there fully populated.
+rem Order matters: a python on the Windows PATH wins over the project venv.
+rem That is deliberate - the machine's configured interpreter is treated as the
+rem source of truth. The dependency check below is what keeps this safe: if the
+rem PATH interpreter lacks the project packages, the script stops with the exact
+rem pip command instead of starting up half-broken.
 set "PY="
 if defined CONVERTER_PYTHON set "PY=%CONVERTER_PYTHON%"
 
-rem 2a. project venv first (relative to this script, so it works from anywhere)
+rem 2a. first python on the Windows PATH (Windows environment variable)
+if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY set "PY=%%W"
+
+rem 2b. project venv (relative to this script, so it works from anywhere)
 if not defined PY for %%P in (
     "%~dp0..\.venv\Scripts\python.exe"
     "%~dp0..\venv\Scripts\python.exe"
     "%~dp0..\env\Scripts\python.exe"
 ) do if not defined PY if exist %%P set "PY=%%~P"
 
-rem 2b. other known locations
+rem 2c. last resort: the WorkBuddy desktop app's bundled interpreter
 if not defined PY for %%P in (
     "%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
 ) do if not defined PY if exist %%P set "PY=%%~P"
-
-rem 2c. last resort: whatever is first on PATH
-if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY set "PY=%%W"
 
 if not defined PY (
     echo [ERROR] No usable Python interpreter found.

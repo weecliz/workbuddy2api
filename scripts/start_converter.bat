@@ -44,20 +44,24 @@ if not exist "core\converter.py" (
 )
 
 rem ---------- 1. locate python ----------
-rem Order matters: the project's own venv must win over whatever `python` happens
-rem to be on PATH, otherwise a bare system interpreter (without the project deps)
-rem gets picked and the script fails for no good reason.
+rem Order matters: a python on the Windows PATH wins over the project venv.
+rem That is deliberate - the machine's configured interpreter is treated as the
+rem source of truth. The dependency check below is what keeps this safe: if the
+rem PATH interpreter lacks the project packages, the script stops with the exact
+rem pip command instead of starting up half-broken.
 set "PY="
 if defined CONVERTER_PYTHON set "PY=%CONVERTER_PYTHON%"
 
+rem 1a. first python on the Windows PATH (Windows environment variable)
+if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY set "PY=%%W"
+
+rem 1b. project venv and the WorkBuddy bundled interpreter
 if not defined PY for %%P in (
     "%~dp0..\.venv\Scripts\python.exe"
     "%~dp0..\venv\Scripts\python.exe"
     "%~dp0..\env\Scripts\python.exe"
     "%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
 ) do if not defined PY if exist %%P set "PY=%%~P"
-
-if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY set "PY=%%W"
 
 if not defined PY (
     echo [ERROR] No usable Python interpreter found.
