@@ -121,6 +121,7 @@
       <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-500 rounded-full whitespace-nowrap" data-tab="models"><i class="fa-solid fa-shapes mr-1"></i> 模型配置</button>
       <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-500 rounded-full whitespace-nowrap" data-tab="schedules"><i class="fa-solid fa-clock-rotate-left mr-1"></i> 定时任务</button>
       <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-500 rounded-full whitespace-nowrap" data-tab="logs"><i class="fa-solid fa-list mr-1"></i> 日志</button>
+      <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-500 rounded-full whitespace-nowrap" data-tab="usage"><i class="fa-solid fa-chart-column mr-1"></i> 用量统计</button>
       <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-500 rounded-full whitespace-nowrap" data-tab="sync"><i class="fa-solid fa-cloud-arrow-up mr-1"></i> 同步设置</button>
       <button class="tab-btn px-4 py-2 text-sm font-medium text-slate-500 rounded-full whitespace-nowrap" data-tab="settings"><i class="fa-solid fa-gear mr-1"></i> 设置</button>
     </div>
@@ -306,6 +307,55 @@
       <div id="logPager" class="flex justify-between items-center mt-3 text-sm text-slate-500"></div>
     </section>
 
+    <!-- 用量统计面板：数据源是上游真实账单，与「日志」的本地记账互补 -->
+    <section id="panel-usage" class="hidden">
+      <div class="flex flex-wrap justify-between items-center mb-3 gap-2">
+        <h2 class="font-semibold">用量统计 <span class="text-xs font-normal text-slate-400" title="直接读取上游真实用量接口，非本地估算">上游真实用量</span></h2>
+        <div class="flex flex-wrap gap-2 items-center">
+          <button onclick="_usStep(-1)" class="px-2.5 py-1.5 rounded-lg border text-sm hover:bg-slate-50" title="按当前区间跨度整体前移（单日即前一天）"><i class="fa-solid fa-chevron-left mr-1"></i>前一天</button>
+          <input id="usStart" type="date" class="border rounded px-2 py-1.5 text-sm" title="起始日期（不可晚于结束日期，不可选未来）" />
+          <span class="text-slate-400 text-sm">~</span>
+          <input id="usEnd" type="date" class="border rounded px-2 py-1.5 text-sm" title="结束日期（不可早于起始日期，不可选未来）" />
+          <button onclick="_usStep(1)" class="px-2.5 py-1.5 rounded-lg border text-sm hover:bg-slate-50" title="按当前区间跨度整体后移（单日即后一天）"><i class="fa-solid fa-chevron-right mr-1"></i>后一天</button>
+          <select id="usAccount" class="border rounded px-2 py-1.5 text-sm" title="选择账号，默认全部">
+            <option value="">全部账号（号池汇总）</option>
+          </select>
+          <button onclick="loadUsage()" class="px-3 py-1.5 rounded-lg btn-primary text-sm"><i class="fa-solid fa-chart-simple mr-1"></i> 查询</button>
+          <button onclick="loadUsage(true)" class="px-3 py-1.5 rounded-lg border text-sm" title="忽略 60s 缓存，重新拉取上游"><i class="fa-solid fa-rotate mr-1"></i> 强制刷新</button>
+        </div>
+      </div>
+      <div class="flex flex-wrap gap-2 mb-3" id="usQuick">
+        <span class="text-xs text-slate-400 self-center mr-1">快捷区间：</span>
+      </div>
+      <div id="usCards" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4"></div>
+      <div id="usHint" class="text-xs text-slate-400 mb-3"></div>
+      <div class="grid md:grid-cols-2 gap-4 mb-4">
+        <div class="card p-4">
+          <h3 class="text-sm font-semibold mb-3"><i class="fa-solid fa-calendar-day mr-1 text-slate-400"></i> 按天用量</h3>
+          <div id="usByDay" class="text-sm text-slate-400">查询后显示</div>
+        </div>
+        <div class="card p-4">
+          <h3 class="text-sm font-semibold mb-3"><i class="fa-solid fa-shapes mr-1 text-slate-400"></i> 按模型分布</h3>
+          <div id="usByModel" class="text-sm text-slate-400">查询后显示</div>
+        </div>
+      </div>
+      <div class="card mb-4 overflow-hidden">
+        <div class="px-4 py-3 border-b flex justify-between items-center">
+          <h3 class="text-sm font-semibold"><i class="fa-solid fa-user-group mr-1 text-slate-400"></i> 分账号明细</h3>
+          <span class="text-xs text-slate-400">按积分降序</span>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm min-w-sm">
+            <thead class="bg-slate-50 text-slate-500 text-left"><tr>
+              <th class="px-4 py-2.5">账号</th><th class="px-4 py-2.5">请求数</th><th class="px-4 py-2.5">积分</th>
+              <th class="px-4 py-2.5">最早请求</th><th class="px-4 py-2.5">最晚请求</th>
+            </tr></thead>
+            <tbody id="usAccBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <!-- 同步设置面板 -->
     <section id="panel-sync" class="hidden">
       <h2 class="font-semibold mb-3">线上同步设置</h2>
@@ -417,7 +467,37 @@ function _runModalCleanups() {
 }
 function openModal(html) { _runModalCleanups(); $("#modalBox").innerHTML = html; $("#modal").classList.remove("hidden"); $("#modal").classList.add("flex"); }
 function closeModal() { _runModalCleanups(); $("#modal").classList.add("hidden"); $("#modal").classList.remove("flex"); }
-function copyText(sel){ const i = $(sel); if(!i) return; i.select(); navigator.clipboard?.writeText(i.value) || document.execCommand("copy"); toast("已复制"); }
+function copyText(sel){
+  /* 修复：目标可能是 <input>（有 .value/.select()）也可能是 <code> 等普通元素
+     （没有 .select()，直接调会抛 TypeError，导致“点了没反应”）。
+     另外 navigator.clipboard 只在安全上下文（https / localhost）下存在，
+     局域网 http://ip:port 访问时为 undefined，必须回退到 execCommand。 */
+  const el = $(sel);
+  if(!el) return;
+  const text = (typeof el.value === "string" && el.value) ? el.value : (el.textContent || "").trim();
+  if(!text){ toast("没有可复制的内容", "err"); return; }
+
+  const fallback = () => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch(e) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  };
+
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(text)
+      .then(() => toast("已复制"))
+      .catch(() => toast(fallback() ? "已复制" : "复制失败，请手动选中", fallback() ? "ok" : "err"));
+  } else {
+    toast(fallback() ? "已复制" : "复制失败，请手动选中", fallback() ? "ok" : "err");
+  }
+}
 
 document.addEventListener("DOMContentLoaded", () => {
   $("#modal")?.addEventListener("click", (e) => { if (e.target === $("#modal")) closeModal(); });
@@ -436,14 +516,14 @@ function logout() { localStorage.removeItem(TOKEN_KEY); location.reload(); }
 function enterApp() {
   $("#login").classList.add("hidden"); $("#app").classList.remove("hidden");
   $("#proxyUrl").textContent = location.origin + "/v1";
-  loadAccounts(); loadKeys(); loadModels(); loadSchedules(); loadLogs(); loadSyncConfig(); loadShareInfo();
+  loadAccounts(); loadKeys(); loadModels(); loadSchedules(); loadLogs(); loadSyncConfig(); loadShareInfo(); initUsagePanel();
 }
 
 // Tabs
 document.querySelectorAll(".tab-btn").forEach(b => b.onclick = () => {
   document.querySelectorAll(".tab-btn").forEach(x => x.classList.remove("active", "text-wb"));
   b.classList.add("active");
-  ["accounts","keys","models","schedules","logs","sync","settings"].forEach(t => {
+  ["accounts","keys","models","schedules","logs","usage","sync","settings"].forEach(t => {
     $(`#panel-${t}`).classList.toggle("hidden", b.dataset.tab !== t);
   });
 });
@@ -1555,6 +1635,312 @@ async function exportLogs(){
     URL.revokeObjectURL(url);
     toast("已导出 usage_logs.csv");
   } catch(e){ toast("导出异常: " + e.message, "err"); }
+}
+
+/* ==================== 用量统计（上游真实用量） ====================
+   与上方「用量日志」的区别：日志读本地 usage_logs 表（网关自己的估算/回写记账），
+   本模块直读上游账单接口 /billing/meter/get-user-request-usage，是权威口径。
+   区间不写死当天：默认今天，但可自由选任意起止日期。
+
+   渲染一律走 DOM 构建（textContent / replaceChildren），不用 innerHTML 拼外部数据：
+   账号名、模型名、输入摘要都来自上游，属外部数据，一旦拼进 innerHTML 就是注入面。 */
+let _usState = { start:"", end:"", accountId:"" };
+
+/* 安全建节点：文本一律走 textContent */
+function _el(tag, cls, text){
+  const n = document.createElement(tag);
+  if(cls) n.className = cls;
+  if(text != null) n.textContent = String(text);
+  return n;
+}
+function _attr(n, attrs){
+  for(const k in (attrs||{})) if(attrs[k] != null) n.setAttribute(k, String(attrs[k]));
+  return n;
+}
+/* 用新节点替换容器全部子节点 */
+function _mount(sel, nodes){
+  const host = $(sel); if(!host) return;
+  host.replaceChildren(...(Array.isArray(nodes) ? nodes : [nodes]));
+}
+/* 空态/加载/错误 提示行 */
+function _usMsg(text, cls, icon){
+  const d = _el("div", "col-span-full text-sm " + (cls||"text-slate-400"));
+  if(icon){ const i = _el("i", "fa-solid " + icon + " mr-1"); d.appendChild(i); }
+  d.appendChild(document.createTextNode(String(text)));
+  return d;
+}
+/* 卡片（DOM 版，替代返回 HTML 字符串的 card()） */
+function _cardNode(t, v, ic, col){
+  const box = _el("div", "card p-4");
+  box.appendChild(_el("div", "text-slate-400 text-xs", t));
+  const row = _el("div", "mt-1 flex items-center gap-2");
+  row.appendChild(_el("i", "fa-solid " + ic + " " + col));
+  row.appendChild(_el("span", "text-2xl font-bold", v));
+  box.appendChild(row);
+  return box;
+}
+/* 占比条形行：左侧标签 + 条形 + 右侧「N 次 / X 积分」 */
+function _barRow(label, requests, credits, maxCredits, labelCls, title){
+  const row = _el("div", "flex items-center gap-2");
+  _attr(row, { title });
+  row.appendChild(_el("span", "text-[11px] text-slate-500 " + labelCls, label));
+  const track = _el("div", "flex-1 h-4 bg-slate-100 rounded-full overflow-hidden");
+  const bar = _el("div", "h-full bg-wb rounded-full");
+  bar.style.width = Math.max(2, (Number(credits)||0) / maxCredits * 100).toFixed(1) + "%";
+  track.appendChild(bar);
+  row.appendChild(track);
+  row.appendChild(_el("span", "text-[11px] text-slate-500 w-[86px] text-right shrink-0",
+                      `${requests} 次 / ${fmtCredits(credits)}`));
+  return row;
+}
+
+/* 上游返回的就是本地时间字符串（无时区后缀），切勿走 fmtTime 的 +8 换算 */
+function fmtLocalTime(s){
+  if(!s) return "-";
+  const m = String(s).replace("T"," ").match(/^(\d{4}-\d{2}-\d{2})[ ](\d{2}:\d{2}):\d{2}/);
+  return m ? (m[1] + " " + m[2]) : String(s);
+}
+function fmtCredits(n){
+  const v = Number(n) || 0;
+  return v === 0 ? "0" : v.toFixed(2);
+}
+/* 取本地日期 YYYY-MM-DD。
+   不能直接用 toISOString()——它转成 UTC，东八区凌晨 0:00~8:00 会算成前一天，
+   导致早上打开页面时「今天」显示为昨天。这里按本地时区逐字段取值。 */
+function _usDateStr(d){
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
+}
+/* 从任意基准日期（而非“今天”）偏移 n 天，用本地时间构造，避开 UTC 跨日问题 */
+function _usShiftFrom(base, n){
+  const d = base ? new Date(base + "T00:00:00") : new Date();
+  d.setDate(d.getDate() + n);
+  return _usDateStr(d);
+}
+function _usShift(n){
+  const d = new Date(); d.setDate(d.getDate() + n); return _usDateStr(d);
+}
+
+/* 前一天 / 后一天：按「当前所选区间」的跨度整体平移，不是固定 1 天。
+   这样选了「近 7 天」再点后一天，得到的是再后一天结束的 7 天窗口，行为可预期。 */
+/* 区间约束（四重）：不许未来、起止联动、跨度上限、失败时回退到合法值。
+   上游接口虽有 "任意区间" 能力，但放任用户选出「起始晚于结束 / 未来日期 / 跨几年」
+   只会得到空结果或几百页无意义翻页。changed 指明用户刚改的是哪一端：
+   改起始就带着结束走，改结束就带着起始走，避免把用户想要的那一端顶掉。
+   input[type=date] 的 min/max 只约束日历弹窗，手输仍能绕过，故必须 JS 再校一次。 */
+const _US_MAX_DAYS = 366;   // 与后端 backend.usage.normalize_range 的上限保持一致
+function _usClampRange(changed){
+  const S = $("#usStart"), E = $("#usEnd");
+  if(!S || !E) return false;
+  const today = _usDateStr(new Date());
+  const before = S.value + "|" + E.value;
+  let s = S.value || today;
+  let e = E.value || s;
+  // 1) 不许选未来：超出则夹回今天
+  if(s > today) s = today;
+  if(e > today) e = today;
+  // 2) 起止联动：颠倒时把另一端对齐到刚改的那一端
+  if(s > e){
+    if(changed === "start") e = s;
+    else if(changed === "end") s = e;
+    else { s = e; }   // 未指明来源（如点查询）：以结束日为准
+  }
+  // 3) 跨度上限：超出则从固定的一端回推，保证不静默改变另一端语义
+  const sd = new Date(s + "T00:00:00");
+  const ed = new Date(e + "T00:00:00");
+  const days = Math.round((ed - sd) / 86400000);
+  if(days > _US_MAX_DAYS){
+    if(changed === "start") s = _usShiftFrom(e, -_US_MAX_DAYS);
+    else e = _usShiftFrom(s, _US_MAX_DAYS);
+  }
+  S.value = s;
+  E.value = e;
+  return before !== (s + "|" + e);
+}
+
+function _usStep(step){
+  const s = ($("#usStart")||{}).value || "";
+  const e = ($("#usEnd")||{}).value || "";
+  const s0 = s || _usDateStr(new Date());
+  const e0 = e || s0;
+  const sd = new Date(s0 + "T00:00:00");
+  const ed = new Date(e0 + "T00:00:00");
+  if(isNaN(sd) || isNaN(ed)) return;
+  // 至少按 1 天平移；区间本身多长就平移多久
+  const span = Math.max(1, Math.round((ed - sd) / 86400000) + 1);
+  const ns = _usShiftFrom(s0, step * span);
+  const ne = _usShiftFrom(e0, step * span);
+  // 不允许滑到未来：结束日以今天为上限（到了边界要给出反馈，否则像是按钮坏了）
+  const today = _usDateStr(new Date());
+  if(ne > today){
+    if(step > 0) toast("已经是今天了，没有更晚的数据", "err");
+    return;
+  }
+  $("#usStart").value = ns;
+  $("#usEnd").value = ne;
+  loadUsage();
+}
+
+async function initUsagePanel(){
+  if(!$("#usStart")) return;
+  const today = _usDateStr(new Date());
+  if(!$("#usStart").value){ $("#usStart").value = today; $("#usEnd").value = today; }
+  // 用 max 锁住日历弹窗的可选范围（手输仍由 _usClampRange 兜底）
+  for(const [sel, key] of [["#usStart", "start"], ["#usEnd", "end"]]){
+    const el = $(sel);
+    if(!el) continue;
+    el.max = today;
+    el.onchange = () => _usClampRange(key);
+  }
+  _usClampRange();
+  const quick = [
+    ["今天", () => [today, today]],
+    ["昨天", () => [_usShift(-1), _usShift(-1)]],
+    ["近 7 天", () => [_usShift(-6), today]],
+    ["近 30 天", () => [_usShift(-29), today]],
+    ["本月", () => [today.slice(0,7) + "-01", today]],
+  ];
+  const box = $("#usQuick");
+  if(box){
+    // 「前一天 / 后一天」放在上方日期框两侧（见 HTML），这里只渲染跨度预设
+    box.replaceChildren(
+      _el("span", "text-xs text-slate-400 self-center mr-1", "快捷区间："),
+      ...quick.map(([label, fn]) => {
+        const b = _el("button", "px-3 py-1 rounded-full border text-xs hover:bg-slate-50", label);
+        b.onclick = () => { const [s,e] = fn(); $("#usStart").value = s; $("#usEnd").value = e; loadUsage(); };
+        return b;
+      })
+    );
+  }
+  await loadUsageAccounts();
+  loadUsage();
+}
+
+async function loadUsageAccounts(){
+  try {
+    const r = await api("/api/usage/accounts");
+    if(!r.ok) return;
+    const d = await r.json();
+    const sel = $("#usAccount"); if(!sel) return;
+    const opts = [_el("option", null, "全部账号（号池汇总）")];
+    _attr(opts[0], { value: "" });
+    for(const a of (d.items || [])){
+      const o = _el("option", null, String(a.name || "") + (a.status === "active" ? "" : "（已禁用）"));
+      _attr(o, { value: a.id });
+      opts.push(o);
+    }
+    sel.replaceChildren(...opts);
+  } catch(e){ /* 下拉加载失败不影响主查询 */ }
+}
+
+async function loadUsage(force){
+  // 任何触发路径（按钮 / 快捷区间 / 前后一天 / 手输）都先过一遍约束，
+  // 保证「界面上看到的区间」永远等于「实际查询的区间」
+  _usClampRange();
+  const start = ($("#usStart")||{}).value || "";
+  const end = ($("#usEnd")||{}).value || "";
+  const accountId = ($("#usAccount")||{}).value || "";
+  _usState = { start, end, accountId };
+  _mount("#usCards", _usMsg("正在从上游拉取用量（各账号并发查询，首次可能需几秒）...", "text-slate-400", "fa-spinner fa-spin"));
+  const q = `start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`
+    + (accountId ? `&account_id=${accountId}` : "")
+    + (force ? "&refresh=true" : "");
+  try {
+    const r = await api("/api/usage/summary?" + q);
+    const { ok, data:d } = await safeJson(r);
+    if(!r.ok){ _mount("#usCards", _usMsg("查询失败: " + (d.detail||"未知错误"), "text-red-500")); return; }
+    renderUsageSummary(d);
+  } catch(e){
+    _mount("#usCards", _usMsg("异常: " + e.message, "text-red-500"));
+  }
+}
+
+function renderUsageSummary(d){
+  const s = d.summary || {};
+  const reqs = Number(s.requests)||0, credits = Number(s.credits)||0;
+  const byDay = d.by_day || [];
+  const byModel = d.by_model || [];
+  const accs = d.accounts || [];
+
+  _mount("#usCards", [
+    _cardNode("总请求数", reqs.toLocaleString(), "fa-paper-plane", "text-sky-500"),
+    _cardNode("总积分", fmtCredits(credits), "fa-coins", "text-amber-500"),
+    _cardNode("账号数", accs.length, "fa-user-group", "text-indigo-500"),
+    _cardNode("覆盖天数", byDay.length, "fa-calendar-day", "text-emerald-500"),
+  ]);
+
+  /* 提示行：缓存命中 / 主力模型 / 区间 / 部分失败 */
+  const hintNodes = [];
+  const pushHint = (text, cls) => {
+    if(hintNodes.length) hintNodes.push(document.createTextNode(" · "));
+    hintNodes.push(_el("span", cls || "", text));
+  };
+  if(d.cached) pushHint("命中 60s 缓存", "text-emerald-600");
+  const top = byModel[0];
+  if(top) pushHint(`主力模型 ${top.model}（${top.requests} 次 / ${fmtCredits(top.credits)} 积分）`, "");
+  pushHint(`区间 ${fmtLocalTime(d.start)} ~ ${fmtLocalTime(d.end)}`, "");
+  if(d.partial) pushHint("部分账号查询失败，汇总不完整", "text-amber-600");
+  _mount("#usHint", hintNodes);
+
+  const maxDay = Math.max(1, ...byDay.map(x => Number(x.credits)||0));
+  _mount("#usByDay", byDay.length
+    ? [_el("div", "space-y-2 max-h-64 overflow-y-auto pr-1",
+        "")].map(wrap => {
+          wrap.replaceChildren(...byDay.map(x => _barRow(
+            String(x.date).slice(5), x.requests, x.credits, maxDay,
+            "w-[70px] shrink-0",
+            `${x.date}：${x.requests} 次请求 / ${fmtCredits(x.credits)} 积分`)));
+          return wrap;
+        })
+    : [_el("p", "text-slate-400", "该区间无请求数据")]);
+
+  const maxM = Math.max(1, ...byModel.map(x => Number(x.credits)||0));
+  _mount("#usByModel", byModel.length
+    ? [_el("div", "space-y-2 max-h-64 overflow-y-auto pr-1", "")].map(wrap => {
+        wrap.replaceChildren(...byModel.map(x => _barRow(
+          String(x.model).slice(0, 22), x.requests, x.credits, maxM,
+          "w-[110px] truncate shrink-0 font-mono",
+          `${x.model}：${x.requests} 次请求 / ${fmtCredits(x.credits)} 积分`)));
+        return wrap;
+      })
+    : [_el("p", "text-slate-400", "该区间无请求数据")]);
+
+  /* 分账号明细：失败账号单独标注原因，不能静默吞掉 */
+  const host = $("#usAccBody"); if(!host) return;
+  if(!accs.length){
+    const tr = _el("tr");
+    const td = _el("td", "px-4 py-8 text-center text-slate-400", "无账号数据");
+    _attr(td, { colspan: 5 });
+    tr.appendChild(td);
+    host.replaceChildren(tr);
+    return;
+  }
+  host.replaceChildren(...accs.map(a => {
+    const tr = _el("tr", "border-t");
+    const tdName = _el("td", "px-4 py-2.5");
+    const flex = _el("div", "flex items-center gap-2");
+    flex.appendChild(_el("span", "font-medium text-slate-700", a.account_name || "-"));
+    if(a.truncated){
+      flex.appendChild(_attr(_el("span", "text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700", "截断"),
+                            { title: "数据量超出单次拉取上限，已截断" }));
+    }
+    if(!a.ok){
+      flex.appendChild(_attr(_el("span", "text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700", "失败"),
+                            { title: a.error || "查询失败" }));
+    }
+    tdName.appendChild(flex);
+    tr.appendChild(tdName);
+
+    tr.appendChild(_el("td", "px-4 py-2.5 " + (a.ok ? "" : "text-slate-300"),
+                       a.ok ? Number(a.requests).toLocaleString() : "-"));
+    tr.appendChild(_el("td", "px-4 py-2.5 " + (a.ok ? "" : "text-slate-300"),
+                       a.ok ? fmtCredits(a.credits) : "-"));
+    tr.appendChild(_el("td", "px-4 py-2.5 text-xs text-slate-400 whitespace-nowrap",
+                       fmtLocalTime(a.earliest_request_at)));
+    tr.appendChild(_el("td", "px-4 py-2.5 text-xs text-slate-400 whitespace-nowrap",
+                       fmtLocalTime(a.latest_request_at)));
+    return tr;
+  }));
 }
 
 // 启动

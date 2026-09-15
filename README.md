@@ -10,6 +10,77 @@
 
 ---
 
+## 快速上手
+
+只有三步（默认用 SQLite，**不需要装任何数据库**）：
+
+```bash
+cp .env.example .env          # 1. 复制配置（默认值即可先跑通）
+pip install -r requirements.txt   # 2. 装依赖
+python main.py                # 3. 启动，默认监听 0.0.0.0:8790
+```
+
+然后用浏览器打开 **`http://127.0.0.1:8790/admin`**，登录：
+
+| 用户名 | 密码 |
+| ------ | ------ |
+| `admin` | `admin123` |
+
+> ⚠️ **部署前请务必改掉**：设置 `.env` 的 `ADMIN_PASSWORD` 与 `ADMIN_JWT_SECRET`（启动时会告警弱口令）。
+
+登录后做两件事就能接入客户端：
+
+1. **「账号」页** → 批量上传 / 扫描本机 / OAuth 添加，导入 WorkBuddy 登录态
+2. **「密钥」页** → 创建一把 Key，复制走
+
+更完整的三种运行方式见 [四、环境安装与项目运行](#四环境安装与项目运行)。
+
+---
+
+## 关键信息速查
+
+| 你要的 | 值 |
+| ------ | ------ |
+| 管理后台 | `http://<host>:8790/admin` |
+| OpenAI 系客户端 base_url | `http://<host>:8790/v1` |
+| Anthropic 系（Claude Code）base_url | `http://<host>:8790` —— **不带 `/v1`** |
+| 鉴权头 | `Authorization: Bearer <Key>` 或 `X-API-Key: <Key>` |
+| 账号池 Key（走 `/v1/*`） | 后台「密钥」页创建，**67 字符**，带配额与记账 |
+| 内嵌 Key（走 `/gw/*`） | `.env` 的 `CONVERTER_API_KEY`，**51 字符**，无配额 |
+| 默认数据库 | SQLite（零依赖，数据在 `./data/workbuddy_admin.db`） |
+| 上游报错 `11128` | **内容审核拦截**，不是账号或渠道故障——换号、改配置都没用 |
+
+不确认用哪套协议？**OpenAI 系填 `/v1`，Anthropic 系不填**——两种 SDK 都会自己拼后面的路径。
+
+> ⚠️ **两把 Key 别混用**：长度一眼可辨（**67 = 账号池**、**51 = 桌面端单账号**）。
+> 把 `/gw` 的 Key 换成后台那把，它依然只烧桌面端登录的那个账号。
+
+### 最小接入示例
+
+```bash
+# OpenAI 协议（Cherry Studio / LobeChat / NextChat / Open WebUI 等）
+export OPENAI_BASE_URL=http://127.0.0.1:8790/v1
+export OPENAI_API_KEY=sk-你的67位Key
+```
+
+验证连通性（**网关固定返回流式 SSE**，所以别传 `"stream": false`，也请用长一点的 prompt）：
+
+```bash
+curl -N $OPENAI_BASE_URL/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"deepseek-v4.1-flash",
+       "messages":[{"role":"user","content":"用一句话介绍你自己"}]}'
+```
+
+正常时会逐段输出 `data: {...}`，最后以 `data: [DONE]` 结束。
+
+> ⚠️ 不要用 `Reply with exactly: OK` 这类超短 prompt 做连通性验证——它极易触发上游内容审核。
+
+各客户端的完整配置见 [六、客户端接入](#六客户端接入)。
+
+---
+
 ## 项目运行截图
 
 <img src="./images/img_1.png">
@@ -17,6 +88,13 @@
 <img src="./images/img_3.png">
 
 ## 目录
+
+**新手先看这两个，其余按需：**
+
+- [🚀 快速上手](#快速上手) —— 三步跑起来
+- [📌 关键信息速查](#关键信息速查) —— base_url / Key / 鉴权一头表
+
+详细章节：
 
 - [更新日志](#更新日志)
 - [一、逆向工程：解包 WorkBuddy 桌面端源码（app_source）](#一逆向工程解包-workbuddy-桌面端源码app_source)
@@ -189,6 +267,12 @@ WORKBUDDY_VERSION              # 默认 2.0.0
 - **API Key 管理**：后台创建 Key 给别人用，可设每个 Key 的积分上限
 - **配额拦截**：Key 已用积分 ≥ 上限时，代理直接返回 `402 {"error":{"message":"积分已耗尽","type":"quota_exceeded"}}`
 - **用量记录**：每次调用落 `usage_logs`，可按 Key / 账号追溯
+- **用量统计页**：直读**上游真实账单**（`/billing/meter/get-user-request-usage`），
+  支持任意起止日期的汇总（按天 / 按模型 / 分账号），并带「前一天 / 后一天」
+  按区间跨度整体平移；缺省当天，另带 今天 / 昨天 / 近 7 天 / 近 30 天 / 本月 快捷区间。
+  日期选择有限制（不可选未来、起止联动、跨度上限 366 天）。
+  与「日志」页的区别：日志是网关自己的记账（逐条可查），统计页是上游权威口径
+  （含桌面端直连等不经网关的调用）
 - **每日签到定时任务**：见 [五](#五每日签到定时任务daily_checkin)
 
 ### 3.2 稳定性设计（借鉴 `workbuddy2ap-2`）
@@ -218,10 +302,13 @@ WORKBUDDY_VERSION              # 默认 2.0.0
 | 账号 | `GET/POST /api/accounts` · `POST /api/accounts/batch` | 账号列表 + 汇总 / 新增单个 / 批量导入 |
 | 账号 | `POST /api/accounts/{id}/refresh` · `PATCH/DELETE /api/accounts/{id}` | 刷新余额 / 改状态 / 删除 |
 | 账号 | `GET /api/accounts/scan-local` · `POST /api/accounts/import-local` · `POST /api/accounts/{id}/inject` | 扫描本机登录态 / 导入号池 / 注入回本机 |
-| 账号 | `POST /api/oauth/start` · `GET /api/oauth/status/{login_id}` · `POST /api/oauth/commit/{login_id}` | **OAuth 一键加号**（不需要桌面端，见 [3.6](#36-oauth-一键加号不需要桌面端)） |
+| 账号 | `POST /api/oauth/start` · `GET /api/oauth/status/{login_id}` · `POST /api/oauth/commit/{login_id}` | **OAuth 一键加号**（不需要桌面端，见 [3.7](#37-oauth-一键加号不需要桌面端)） |
 | Key | `GET/POST /api/keys` · `PATCH/DELETE /api/keys/{id}` | Key 列表（脱敏）/ 创建 / 改限额 / 停用 / 吊销 |
 | 任务 | `GET/POST /api/schedules` · `PATCH/DELETE /api/schedules/{id}` · `POST /api/schedules/{id}/run` | 定时任务 CRUD / 立即运行 |
-| 用量 | `GET /api/usage` · `GET /api/logs/usage` | 用量汇总 / 明细 |
+| 用量 | `GET /api/usage/summary` · `GET /api/usage/accounts` | **上游真实用量**：区间汇总（按天/按模型/按账号）/ 可选账号列表；支持任意起止日期，非仅当日 |
+| 用量 | `GET /api/usage/detail` | 请求明细（分页，可按模型过滤）。**页面已不再使用**（无 UI 入口），接口保留供脚本/排查调用 |
+| 用量 | `GET /api/logs` · `GET /api/logs/export` | 本地记账明细（网关自己的 `usage_logs` 表）/ 导出 CSV |
+| 用量 | `POST /api/usage/cache/clear` | 清空用量短缓存（排查数据不一致时用） |
 | 代理网关 | `POST /v1/chat/completions` · `GET /v1/models` | 带 Key 校验 + 配额 + 记账 |
 | 代理网关 | `POST /v1/responses` | OpenAI Responses（适配 Codex CLI，默认做投影压缩） |
 | 代理网关 | `POST /v1/messages` · `POST /v1/messages/count_tokens` | Anthropic Messages（适配 Claude Code / CC Switch） |
@@ -232,7 +319,7 @@ WORKBUDDY_VERSION              # 默认 2.0.0
 > OpenAI 系客户端填 `http://<host>:8790/v1`，Anthropic 系（Claude Code）填 `http://<host>:8790`——
 > 两种 SDK 都会自己拼后面的路径。
 
-### 3.4 环境变量（admin）
+### 3.5 环境变量（admin）
 
 `ADMIN_DB_TYPE`（`sqlite` 默认 / `mysql` / `db2`）· `ADMIN_DB_HOST` · `ADMIN_DB_PORT` · `ADMIN_DB_USER` · `ADMIN_DB_PASSWORD` · `ADMIN_DB_NAME`（SQLite 时是数据文件路径；`ADMIN_DB_SCHEMA` 用于 DB2）· `ADMIN_REDIS_URL` · `ADMIN_BACKEND` · `ADMIN_USERNAME` · `ADMIN_PASSWORD` · `ADMIN_JWT_SECRET`（≥32 字节）· `ADMIN_JWT_EXPIRE_HOURS` · `ADMIN_COST_PER_TOKEN` · `ADMIN_ACCOUNT_SELECT`（`remain` / `lru`）· `ADMIN_PORT` · `ADMIN_CLIENT_AUTH_DIR`
 
@@ -249,8 +336,8 @@ python main.py --list-db-types                              # 列出支持的类
 
 数据库类型 / 参数 / 各库差异见 [docs/DB_SUPPORT.md](docs/DB_SUPPORT.md)。
 
-OAuth 一键加号相关（`ADMIN_OAUTH_*`，均可省略）见 [3.6](#36-oauth-一键加号不需要桌面端)。
-客户端身份画像相关（`ADMIN_UPSTREAM_CLIENT_KIND` / `ADMIN_UA_*`）见 [3.7](#37-客户端身份画像workbuddy--codebuddy)。
+OAuth 一键加号相关（`ADMIN_OAUTH_*`，均可省略）见 [3.7](#37-oauth-一键加号不需要桌面端)。
+客户端身份画像相关（`ADMIN_UPSTREAM_CLIENT_KIND` / `ADMIN_UA_*`）见 [3.8](#38-客户端身份画像workbuddy--codebuddy)。
 
 Anthropic 端点（`/v1/messages`）相关：
 
@@ -267,14 +354,14 @@ Anthropic 端点（`/v1/messages`）相关：
 - `CODEBUDDY_AUTH_DIR` —— converter 读取桌面端凭据的目录。**注意与 `ADMIN_CLIENT_AUTH_DIR` 是两个不同的变量**：后者给后台「扫描本机 / 注入本机」用。以 Windows 服务（LocalSystem）方式运行时两者都必须写**绝对路径**，否则 `%LOCALAPPDATA%` 会解析到空目录
 - `CONVERTER_DESENSITIZE` · `CONVERTER_LOG`
 
-### 3.5 已知限制
+### 3.6 已知限制
 
 - 账号凭据（`.info` 原文）以明文存于数据库，生产环境请加密存储或限制库访问
 - 后端未回传 `credits` 时，按 `completion_tokens × COST_PER_TOKEN` 估算扣费（经验值）
 - 配额扣减在流式结束后的 `finally` 里提交，高并发下非严格原子（极端竞态可能短暂超额）
 - 余额刷新受腾讯后端限流影响（约每日 15:12 UTC+8 重置窗口），刷新失败余额保持不变
 
-### 3.6 OAuth 一键加号（不需要桌面端）
+### 3.7 OAuth 一键加号（不需要桌面端）
 
 账号页的 **「OAuth 添加」** 按钮：在浏览器完成一次官方登录即可把账号加进号池，
 **不需要桌面端参与、也不需要手工拷贝 `.info`**。云上部署（Sealos 等）时这条路径最省事。
@@ -365,7 +452,7 @@ Anthropic 端点（`/v1/messages`）相关：
 
 > 排查用：`GET /api/oauth/pending` 返回当前未完成的登录会话数，可确认没有悬挂的 `state`。
 
-### 3.7 客户端身份画像（workbuddy / codebuddy）
+### 3.8 客户端身份画像（workbuddy / codebuddy）
 
 官方两个客户端 —— **WorkBuddy 桌面端** 与 **CodeBuddy CLI** —— 在服务端看来**是同一套客户端**：
 
@@ -684,13 +771,14 @@ workbuddy2api/
 │   │   ├── session.py        # AccountSession：凭据落盘/回写 + 档案与额度
 │   │   ├── checkin.py        # 每日签到
 │   │   ├── growth.py         # 猫猫领养 / 旅行 / 连登 / 活跃上报
+│   │   ├── usage.py          # 上游真实用量：区间全量拉取 + 汇总/按天/按模型聚合
 │   │   └── http.py           # 连接池参数、凭据元信息解析
 │   ├── tasks/                # 后台任务实现（一个任务一个文件）
 │   │   └── daily_checkin.py / cat_travel.py / activity_report.py / common.py
 │   ├── scheduler.py          # 调度框架：轮询 schedules 表并分发到 admin/tasks/
 │   ├── turing_token.py       # Python 侧 X-Device-Token 提供器（subprocess 调 helper）
 │   ├── oauth_login.py        # OAuth 设备授权登录（浏览器登录换凭据，不需桌面端）
-│   ├── routers/              # accounts / oauth / keys / proxy / schedules / logs / sync / models
+│   ├── routers/              # accounts / oauth / keys / proxy / schedules / logs / usage / sync / models
 │   └── static/index.html     # 纯 HTML + TailwindCSS + FontAwesome 管理大屏
 ├── deploy/                   # Docker 部署配置（build context 是仓库根目录）
 │   ├── Dockerfile            # converter 独立版（8787，需挂载桌面端 auth）
@@ -704,7 +792,7 @@ workbuddy2api/
 │   ├── stop_admin.bat        # 停止（按端口找进程树，优雅关闭，可选 --force）
 │   ├── db_probe.py           # 启动前数据库自检（批处理共用，按方言检查驱动与连通性）
 │   └── _proc_tree.ps1        # stop_admin 的进程树查询辅助（查后代 / 祖先）
-├── tests/                    # pytest：代理重试骨架 + 猫猫旅行状态机
+├── tests/                    # pytest：代理重试骨架 + 猫猫旅行状态机 + 用量聚合
 └── README.md
 
 # 逆向产物（不在本仓库，存在于 D:\workbuddy）

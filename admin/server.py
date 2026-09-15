@@ -12,7 +12,7 @@ from admin.config import settings
 from admin.db import ensure_database, init_db, SessionLocal
 from admin.db_config import db_config
 from admin.models import SystemSetting
-from admin.routers import accounts, keys, logs, models, oauth, proxy, schedules, sync
+from admin.routers import accounts, keys, logs, models, oauth, proxy, schedules, sync, usage
 from admin.ratelimit import clear_failures, get_client_ip, is_locked, record_failure
 from admin.security import (
     create_admin_token,
@@ -66,6 +66,7 @@ app.include_router(proxy.router)
 app.include_router(sync.router)
 app.include_router(schedules.router)
 app.include_router(logs.router)
+app.include_router(usage.router)
 
 
 @app.on_event("startup")
@@ -79,6 +80,7 @@ def _startup():
 
 def _get_stored_hash() -> str:
     """读取已存储的密码哈希；无记录或旧明文则迁移为哈希后持久化。"""
+    db = None
     try:
         db = SessionLocal()
         row = db.query(SystemSetting).filter(SystemSetting.key == "admin_password").first()
@@ -90,9 +92,13 @@ def _get_stored_hash() -> str:
                 db.commit()
             return val
     finally:
-        db.close()
+        # db 可能因 SessionLocal() 自身抛异常而从未绑定；
+        # 不判空的话这里会抛 NameError，把真实的数据库错误掩盖掉。
+        if db is not None:
+            db.close()
     # 无记录：用配置默认密码并持久化哈希
     h = hash_password(settings.ADMIN_PASSWORD)
+    db = None
     try:
         db = SessionLocal()
         db.add(SystemSetting(key="admin_password", value=h))
@@ -100,7 +106,8 @@ def _get_stored_hash() -> str:
     except Exception:
         pass
     finally:
-        db.close()
+        if db is not None:
+            db.close()
     return h
 
 
