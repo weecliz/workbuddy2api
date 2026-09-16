@@ -44,28 +44,32 @@ if not exist "core\converter.py" (
 )
 
 rem ---------- 1. locate python ----------
-rem Order matters: a python on the Windows PATH wins over the project venv.
-rem That is deliberate - the machine's configured interpreter is treated as the
-rem source of truth. The dependency check below is what keeps this safe: if the
-rem PATH interpreter lacks the project packages, the script stops with the exact
-rem pip command instead of starting up half-broken.
+rem Order: CONVERTER_PYTHON > project venv > WorkBuddy bundled > PATH.
+rem The project venv must come BEFORE the PATH lookup. A bare
+rem "where python" frequently resolves to a system interpreter that lacks the
+rem project packages, so startup would abort with "missing dependencies" even
+rem though .venv, sitting right there, has everything.
+rem Candidates that cannot do the job are skipped rather than chosen blindly
+rem (see :try_py below), so a bad PATH entry no longer blocks startup.
 set "PY="
 if defined CONVERTER_PYTHON set "PY=%CONVERTER_PYTHON%"
 
-rem 1a. first python on the Windows PATH (Windows environment variable)
-if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY set "PY=%%W"
-
-rem 1b. project venv and the WorkBuddy bundled interpreter
+rem 1a. project venv and the WorkBuddy bundled interpreter
 if not defined PY for %%P in (
     "%~dp0..\.venv\Scripts\python.exe"
     "%~dp0..\venv\Scripts\python.exe"
     "%~dp0..\env\Scripts\python.exe"
     "%USERPROFILE%\.workbuddy\binaries\python\envs\default\Scripts\python.exe"
-) do if not defined PY if exist %%P set "PY=%%~P"
+) do if not defined PY if exist %%P call :try_py "%%~P"
+
+rem 1b. last resort: whatever is first on PATH
+if not defined PY for /f "delims=" %%W in ('where python 2^>nul') do if not defined PY call :try_py "%%~W"
 
 if not defined PY (
     echo [ERROR] No usable Python interpreter found.
-    echo         Install Python 3.10+ or set CONVERTER_PYTHON to your python.exe.
+    echo         Need Python 3.10+ with the project dependencies installed.
+    echo         Install them into the project venv, or point CONVERTER_PYTHON
+    echo         at a suitable interpreter.
     echo.
     pause
     exit /b 2
@@ -101,6 +105,29 @@ echo.
 "%PY%" -m core.converter %RUN_ARGS% %*
 set "RC=%ERRORLEVEL%"
 
+rem Exit codes: -1 / -1073741510 mean the process was interrupted (Ctrl+C or the
+rem console window was closed) - that is the normal way to stop a foreground run,
+rem not a crash. Only report the troubleshooting block for a real failure.
+if "%RC%"=="-1" (
+    echo.
+    echo ============================================================
+    echo   Stopped (interrupted by Ctrl+C or window close).
+    echo   Log: converter.log
+    echo ============================================================
+    echo.
+    pause
+    endlocal & exit /b 0
+)
+if "%RC%"=="-1073741510" (
+    echo.
+    echo ============================================================
+    echo   Stopped (console window closed). See converter.log.
+    echo ============================================================
+    echo.
+    pause
+    endlocal & exit /b 0
+)
+
 if not "%RC%"=="0" (
     echo.
     echo ============================================================
@@ -117,3 +144,18 @@ if not "%RC%"=="0" (
 )
 
 endlocal & exit /b %RC%
+
+rem ------------------------------------------------------------
+rem  :try_py  <path-to-python>
+rem  Probe a candidate interpreter and set PY only if it has core.converter's
+rem  runtime deps. Interpreter discovery must not blindly trust PATH: the first
+rem  `python` on a machine is often a bare CPython without the project packages,
+rem  and picking it produced a confusing abort even though the project venv next
+rem  to this script was fully populated.
+rem  %%W / %%P from the caller's for-loop are not visible in here, hence the
+rem  "call :try_py" indirection.
+rem ------------------------------------------------------------
+:try_py
+"%~1" -c "import fastapi, httpx" >nul 2>&1
+if not errorlevel 1 set "PY=%~1"
+goto :eof
