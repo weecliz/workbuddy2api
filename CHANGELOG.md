@@ -122,6 +122,11 @@
   - 未新增依赖：`Mapped` / `mapped_column` 是 SQLAlchemy 2.0 原生 API，
     而 `requirements.txt` 早已是 `sqlalchemy>=2.0`。
   - 验证：6 张表 CRUD + 默认值 + 可空性 + 表达式查询共 29 项断言全通过。
+  - `admin/server.py` 的 `_conv_cfg` 在 `except` 降级分支补空 dict：原先降级分支
+    不给它赋值，类型检查器视其为「可能未绑定」，会对下方每个下标访问报 8 条。
+    用空 dict 而非 `None`（后者会把 8 条变成 11 条 “None is not subscriptable”），
+    且降级时 `_CONVERTER_EMBEDDED` 为 False、该块根本不执行，语义安全。
+    至此 `reportPossiblyUnboundVariable` 清零，总报错 80 → 73。
 - **用量统计新增「前一天 / 后一天」快捷切换**：放在起止日期框两侧。
   按**当前区间的跨度整体平移**（单日就是前后一天；选了「近 7 天」则整窗前后移 7 天），
   而非固定 1 天；到今日后不再向未来移动，并给出提示。

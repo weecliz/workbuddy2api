@@ -30,6 +30,12 @@ try:
     _CONVERTER_EMBEDDED = True
 except Exception:  # pragma: no cover - 降级分支
     converter_app = None
+    # 降级时也必须给 _conv_cfg 一个值，否则它是「可能未绑定」，类型检查器会为
+    # 下方每一个下标访问报警（8 条）。用空 dict 而非 None：下方代码写成
+    # _conv_cfg["k"] = v / _conv_cfg.get("k")，空 dict 能让这些访问保持合法，
+    # 而 None 会把 8 条变成 11 条 "None is not subscriptable"。
+    # 语义上也安全：降级时 _CONVERTER_EMBEDDED 为 False，这个块根本不会执行。
+    _conv_cfg = {}
     _CONVERTER_EMBEDDED = False
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -176,11 +182,6 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # 内嵌 converter 网关到 /gw 前缀（单端口部署）。设置脱敏与日志路径以对齐独立运行时的行为。
 if _CONVERTER_EMBEDDED:
     import os
-
-    # 类型收窄：_CONVERTER_EMBEDDED 为 True 意味着上面 import 成功，
-    # 两个名字必然有值；pyright 不做跨变量关联推断，明确一下免得后续
-    # 每个下标访问都报 “possibly unbound / None is not subscriptable”。
-    assert converter_app is not None and _conv_cfg is not None
 
     _conv_cfg["desensitize"] = os.getenv("CONVERTER_DESENSITIZE", "1") != "0"
     _conv_cfg["log_path"] = os.getenv(
