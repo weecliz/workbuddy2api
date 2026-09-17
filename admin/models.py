@@ -1,7 +1,23 @@
-"""ORM 模型：账号、API Key、用量日志。"""
-from datetime import datetime
+"""ORM 模型：账号、API Key、用量日志。
 
-from sqlalchemy import CLOB, Column, DateTime, Float, Integer, String, Text
+用 SQLAlchemy 2.0 的 ``Mapped[...]`` + ``mapped_column()`` 声明式写法，
+而不是旧式 ``Column()``：后者的类属性在类型层面是 ``Column[X]``，
+类型检查器（pyright）会把每一处 ``obj.attr = <X>`` 与 ``obj.attr`` 都判为
+"X 不能赋给 Column[X]"，在本项目里累计出 200+ 条纯噪音，把真问题（例如
+未定义名）淹没在其中。
+
+``Mapped[X]`` 让类属性就是 ``X``；**可空性由注解决定**：
+    Mapped[int]        -> NOT NULL
+    Mapped[int | None] -> NULL
+
+因此下面每个字段的可空性都刻意与既有表结构保持一致（见迁移前的
+information_schema 基线），避免只改类型、却把建表 DDL 一起改了。
+"""
+from datetime import datetime
+from typing import Optional
+
+from sqlalchemy import CLOB, DateTime, Float, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
 
 from admin.db import Base
 
@@ -19,28 +35,32 @@ class Account(Base):
 
     __tablename__ = "accounts"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(120), nullable=False, default="")
-    uid = Column(String(120), default="")
-    enterprise_id = Column(String(120), default="")
-    domain = Column(String(120), default="")
-    auth_json = Column(TextColumn, nullable=False)  # 原始 .info 内容（含 token）
-    status = Column(String(16), default="active")  # active | disabled
-    balance_total = Column(Integer, default=0)
-    balance_remain = Column(Integer, default=0)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    uid: Mapped[Optional[str]] = mapped_column(String(120), default="")
+    enterprise_id: Mapped[Optional[str]] = mapped_column(String(120), default="")
+    domain: Mapped[Optional[str]] = mapped_column(String(120), default="")
+    # 原始 .info 内容（含 token）
+    auth_json: Mapped[str] = mapped_column(TextColumn, nullable=False)
+    status: Mapped[Optional[str]] = mapped_column(String(16), default="active")  # active | disabled
+    balance_total: Mapped[Optional[int]] = mapped_column(Integer, default=0)
+    balance_remain: Mapped[Optional[int]] = mapped_column(Integer, default=0)
     # 成长中心连登天数（GET /v2/activity/growth/streak，刷新余额时顺带同步）
-    streak_days = Column(Integer, nullable=True)
-    last_sync_at = Column(DateTime, nullable=True)
-    last_used_at = Column(DateTime, nullable=True)
+    streak_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_sync_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     # 稳定性状态机：错误计数 / 冷却 / 防撞号 / 禁用原因
-    err_count = Column(Integer, default=0)          # 连续上游 5xx 计数
-    cool_until = Column(DateTime, nullable=True)    # 冷却截止时间
-    cool_kind = Column(String(16), default="")       # hard_credit | soft_rate | error_threshold | not_found
-    last_err_at = Column(DateTime, nullable=True)
-    last_err_msg = Column(String(255), default="")
-    last_picked_at = Column(DateTime, nullable=True)  # 最近一次被选中，用于 100ms 防撞号窗口
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    err_count: Mapped[Optional[int]] = mapped_column(Integer, default=0)  # 连续上游 5xx 计数
+    cool_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)  # 冷却截止时间
+    # hard_credit | soft_rate | error_threshold | not_found
+    cool_kind: Mapped[Optional[str]] = mapped_column(String(16), default="")
+    last_err_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    last_err_msg: Mapped[Optional[str]] = mapped_column(String(255), default="")
+    # 最近一次被选中，用于 100ms 防撞号窗口
+    last_picked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class ApiKey(Base):
@@ -48,18 +68,21 @@ class ApiKey(Base):
 
     __tablename__ = "api_keys"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(120), default="")
-    key_hash = Column(String(128), unique=True, nullable=False)
-    key_prefix = Column(String(16), default="")  # 展示用前缀
-    key_full = Column(KeyFullColumn, default="")  # 完整密钥（仅管理后台查看用，base64 编码存储）
-    credit_limit = Column(Float, default=0)  # 限额（credits）；unlimited=True 时忽略
-    credit_used = Column(Float, default=0)
-    unlimited = Column(Integer, default=0)  # 0/1
-    status = Column(String(16), default="active")  # active | revoked
-    note = Column(String(255), default="")
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[Optional[str]] = mapped_column(String(120), default="")
+    key_hash: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    key_prefix: Mapped[Optional[str]] = mapped_column(String(16), default="")  # 展示用前缀
+    # 完整密钥（仅管理后台查看用，base64 编码存储）
+    key_full: Mapped[Optional[str]] = mapped_column(KeyFullColumn, default="")
+    # 限额（credits）；unlimited=True 时忽略
+    credit_limit: Mapped[Optional[float]] = mapped_column(Float, default=0)
+    credit_used: Mapped[Optional[float]] = mapped_column(Float, default=0)
+    unlimited: Mapped[Optional[int]] = mapped_column(Integer, default=0)  # 0/1
+    status: Mapped[Optional[str]] = mapped_column(String(16), default="active")  # active | revoked
+    note: Mapped[Optional[str]] = mapped_column(String(255), default="")
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class UsageLog(Base):
@@ -72,26 +95,27 @@ class UsageLog(Base):
 
     __tablename__ = "usage_logs"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    api_key_id = Column(Integer, nullable=False, default=0)
-    account_id = Column(Integer, nullable=False, default=0)
-    model = Column(String(120), default="")
-    credits = Column(Float, default=0)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_key_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    account_id: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    model: Mapped[Optional[str]] = mapped_column(String(120), default="")
+    credits: Mapped[Optional[float]] = mapped_column(Float, default=0)
     # 详细用量：优先取上游 usage 字段；缺省为 NULL
-    prompt_tokens = Column(Integer, nullable=True, default=None)
-    completion_tokens = Column(Integer, nullable=True, default=None)
-    total_tokens = Column(Integer, nullable=True, default=None)
-    cached_tokens = Column(Integer, nullable=True, default=None)
+    prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    total_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    cached_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
     # 发起请求的真实客户端 IP（经反代时取 X-Forwarded-For 首个，否则 X-Real-IP / 直连 IP）
-    client_ip = Column(String(64), default="")
+    client_ip: Mapped[Optional[str]] = mapped_column(String(64), default="")
     # 用途标识（透传给上游的 X-Agent-Purpose），便于风控审计与上游请求用量对齐
-    use_case = Column(String(64), default="")
-    # 请求级表格日志字段（ logging）：TTFB / 总耗时 / 序号 / 错误分类
-    seq = Column(Integer, default=0)
-    ttfb_ms = Column(Integer, nullable=True, default=None)
-    latency_ms = Column(Integer, nullable=True, default=None)
-    error_kind = Column(String(32), default="")  # hard_credit | soft_rate | server | not_found | session_dead | transport | client | success
-    created_at = Column(DateTime, default=datetime.utcnow)
+    use_case: Mapped[Optional[str]] = mapped_column(String(64), default="")
+    # 请求级表格日志字段（logging）：TTFB / 总耗时 / 序号 / 错误分类
+    seq: Mapped[Optional[int]] = mapped_column(Integer, default=0)
+    ttfb_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    # hard_credit | soft_rate | server | not_found | session_dead | transport | client | success
+    error_kind: Mapped[Optional[str]] = mapped_column(String(32), default="")
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class ModelConfig(Base):
@@ -99,15 +123,19 @@ class ModelConfig(Base):
 
     __tablename__ = "model_configs"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    level = Column(String(16), default="system")  # system | user
-    model_id = Column(String(120), nullable=False)  # 模型 ID，如 "deepseek-v4-flash"
-    enabled = Column(Integer, default=1)  # 0/1
-    note = Column(String(255), default="")
-    credit_multiplier = Column(Float, default=0)  # 积分消耗倍率；0=免费模型
-    credits_raw = Column(String(120), default="")  # 原始 credits 字符串（如 "x0.05" / "x0.00 credits"）
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    level: Mapped[Optional[str]] = mapped_column(String(16), default="system")  # system | user
+    # 模型 ID，如 "deepseek-v4-flash"
+    model_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    enabled: Mapped[Optional[int]] = mapped_column(Integer, default=1)  # 0/1
+    note: Mapped[Optional[str]] = mapped_column(String(255), default="")
+    # 积分消耗倍率；0=免费模型
+    credit_multiplier: Mapped[Optional[float]] = mapped_column(Float, default=0)
+    # 原始 credits 字符串（如 "x0.05" / "x0.00 credits"）
+    credits_raw: Mapped[Optional[str]] = mapped_column(String(120), default="")
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class SystemSetting(Base):
@@ -115,9 +143,10 @@ class SystemSetting(Base):
 
     __tablename__ = "system_settings"
 
-    key = Column(String(120), primary_key=True)
-    value = Column(TextColumn, default="")
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    key: Mapped[str] = mapped_column(String(120), primary_key=True)
+    value: Mapped[Optional[str]] = mapped_column(TextColumn, default="")
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class Schedule(Base):
@@ -125,16 +154,19 @@ class Schedule(Base):
 
     __tablename__ = "schedules"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(120), default="")
-    task = Column(String(40), default="refresh_balances")  # refresh_balances | sync_models | daily_checkin
-    interval_minutes = Column(Integer, default=60)
-    enabled = Column(Integer, default=1)  # 0/1
-    last_run_at = Column(DateTime, nullable=True)
-    next_run_at = Column(DateTime, nullable=True)
-    last_result = Column(TextColumn, default="")  # 上次运行结果摘要
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[Optional[str]] = mapped_column(String(120), default="")
+    # refresh_balances | sync_models | daily_checkin
+    task: Mapped[Optional[str]] = mapped_column(String(40), default="refresh_balances")
+    interval_minutes: Mapped[Optional[int]] = mapped_column(Integer, default=60)
+    enabled: Mapped[Optional[int]] = mapped_column(Integer, default=1)  # 0/1
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # 上次运行结果摘要
+    last_result: Mapped[Optional[str]] = mapped_column(TextColumn, default="")
     # 停止领取时间（仅 daily_checkin 任务使用）：到达该时间后不再执行领取请求，
     # 避免活动下线后继续请求触发上游风控。可由活动 end_time 预填或运行中发现 EventEnded 自动写入。
-    stop_after = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    stop_after: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

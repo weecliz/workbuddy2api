@@ -177,6 +177,11 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 if _CONVERTER_EMBEDDED:
     import os
 
+    # 类型收窄：_CONVERTER_EMBEDDED 为 True 意味着上面 import 成功，
+    # 两个名字必然有值；pyright 不做跨变量关联推断，明确一下免得后续
+    # 每个下标访问都报 “possibly unbound / None is not subscriptable”。
+    assert converter_app is not None and _conv_cfg is not None
+
     _conv_cfg["desensitize"] = os.getenv("CONVERTER_DESENSITIZE", "1") != "0"
     _conv_cfg["log_path"] = os.getenv(
         "CONVERTER_LOG", str(STATIC_DIR.parent.parent / "logs" / "converter-embedded.log")

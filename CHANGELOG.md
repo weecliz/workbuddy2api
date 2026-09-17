@@ -84,7 +84,6 @@
   文件被客户端占用）会留下截断的 `.info`，把用户客户端登录态弄坏且不可逆。
   改为先写临时文件再 `os.replace`；`OSError` 翻译成带上下文的 500 提示，
   明确告知原始登录态未被修改。
-
 ### 安全
 
 - **前端 5 处 XSS 注入面**（`admin/static/index.html`）：动态数据未转义就拼进
@@ -102,6 +101,17 @@
 
 ### 变更
 
+- **ORM 声明迁移到 SQLAlchemy 2.0 的 `Mapped[...]`**（`admin/models.py`）：
+  旧式 `Column()` 在类型层面使类属性成为 `Column[X]`，类型检查器会把每一处
+  `obj.attr = <X>` 与 `obj.attr` 都判为「X 不能赋给 Column[X]」。本项目累计
+  **250 条**此类噪音，把真问题（如 `reportUndefinedVariable` 抓到过的
+  `AccountSession` 未定义）淹没在里头。迁移后降到 **80 条（−68%）**。
+  - **可空性逐字段对齐旧结构**（`Mapped[X]` = NOT NULL，`Mapped[X | None]` = NULL），
+    三种方言（mysql / sqlite / postgres）的建表 DDL 与迁移前**逐字一致** ——
+    老实例升级**不需要任何数据库迁移**。
+  - 未新增依赖：`Mapped` / `mapped_column` 是 SQLAlchemy 2.0 原生 API，
+    而 `requirements.txt` 早已是 `sqlalchemy>=2.0`。
+  - 验证：6 张表 CRUD + 默认值 + 可空性 + 表达式查询共 29 项断言全通过。
 - **用量统计新增「前一天 / 后一天」快捷切换**：放在起止日期框两侧。
   按**当前区间的跨度整体平移**（单日就是前后一天；选了「近 7 天」则整窗前后移 7 天），
   而非固定 1 天；到今日后不再向未来移动，并给出提示。
