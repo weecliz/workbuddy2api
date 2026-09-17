@@ -10,6 +10,51 @@
 - **修复** Fixed：缺陷修复
 - **安全** Security：凭据、权限、泄露相关
 
+### 新增
+
+- **稳定设备指纹三头**（`core/fingerprint.py`）：向上游请求注入 `X-Machine-ID` /
+  `X-Session-ID` / `X-Request-ID`，由账号 uid 纯哈希派生（`md5("<salt>:<uid>")[:36]`）。
+  - **与账号绑定、与部署环境无关**：不依赖桌面端或 Turing SDK，因此容器 / Sealos
+    等拿不到 `X-Device-Token` 的场景同样生效（这是本次的主要收益点）。
+  - 注入点在 `core/converter.py` 的 `CredentialManager._build_headers_from()`，
+    是对话 / 签到 / 猫猫旅行 / 活跃上报的**唯一共同出口**，一处改动全覆盖。
+  - 算法口径与参考实现 workbuddy2api-hub 的 `wb_fingerprint.py` 逐字对齐，
+    换端或混用同一号池时同一 uid 派生出**相同**设备标识
+    （避免同一账号在两套程序下呈现两套设备而被判为异常登录）。
+  - 开关 `ADMIN_DEVICE_FINGERPRINT`，默认 `on`（对齐 hub 的无条件注入）；
+    仅作回滚逃生口，设 `off` 即恢复改动前行为。
+  - 说明：`X-Machine-ID` / `X-Session-ID` 目前**没有上游校验它们的逆向证据**
+    （README §1.3 只逆向到 `X-Device-Token`）。这项改动的准确定位是
+    「与成熟项目行为一致的加固」，而不是「已验证上游确实校验这三个头」。
+- **账号页展示设备指纹**：账号表格的 UID 列下方新增一行，显示该账号的 `machineId`
+  前 10 位（悬停看完整说明，点击复制完整值）。
+  - 数据由 `GET /api/accounts` 新增的 `machine_id` / `session_id` 字段提供，
+    后端直接调 `core/fingerprint.derive_id()` 现算 —— 与出站请求用的是同一套函数，
+    保证页面显示值与真实出站头**逐字一致**（已有测试断言这一点）。
+  - **uid 缺失时显示警告标记**而不再是哈希值：这种情况所有账号会派生同一个
+    指纹（`derive_id` 对空 uid 退化为固定串 `anonymous`），多账号隔离实际失效，
+    需要让人一眼看到而不是被一个看似正常的哈希掩盖。
+  - 点击复制只把**整数 `id`** 插进 `onclick`，不把哈希字符串拼进 HTML 属性：
+    `esc()` 不转义单引号而属性用单引号包裹，拼字符串会形成注入面。
+- **账号页展示 token 失效时间**：UID 列下方再增一行，按剩余时长分级着色
+  （>30 天灰、<30 天橙、<24 小时红），悬停看绝对时间。
+  - 展示的是 **`refreshExpiresAt`（真正下限）**：access token 临近过期会被
+    `CredentialManager._is_expired` 自动刷新（提前 60s），所以 access 到期
+    并不代表账号失效；只有 refresh token 也到期了才真的不能再续。
+    悬停提示里同时给出 access 到期时间作参考。
+  - 数据由 `GET /api/accounts` 新增的 `token_refresh_expires_ts` /
+    `token_expires_ts` 提供（毫秒时间戳，前端用本地时区格式化）。
+- **Codex 自由格式（custom）工具支持**（`core/responses_adapter.py`）：
+  Codex 的 `apply_patch` 以 Responses 的 `type: "custom"` 声明，无 `parameters`、
+  只收一段自由文本。改动前这类工具被**静默丢弃**（客户端声明了但模型从不调用）。
+  - 请求侧：降级为「单个 `input` 字符串参数」的 function 工具，描述中注入
+    freeform 提示与 `format.definition` 语法。
+  - 响应侧：调用还原为 `custom_tool_call` + `response.custom_tool_call_input.delta/done`
+    事件，并把 `{"input":"..."}` 包拆回自由文本原文。
+  - 入站历史：补齐 `custom_tool_call` / `custom_tool_call_output` 输入项转换
+    —— 此前多轮对话中这类历史项会静默丢失。
+  - 未声明 custom 工具的请求（普通 OpenAI 客户端）**行为完全不变**。
+
 ### 修复
 
 - **「真实积分回写」从未生效**（`admin/routers/proxy.py`）：`_fetch_real_credits()` 里
@@ -19,6 +64,12 @@
   `COST_PER_TOKEN` 估算口径，与实际账单不符。已改为 `backend.AccountSession(...)`。
   该缺陷由 pi-lens 的 `reportUndefinedVariable` 报出（此前容易被同文件近百条 SQLAlchemy
   `Column` 类型误报淹没，误当噪音忽略——它不是类型误报，是真 bug）。
+- **工具与参数的 `description` 在 Responses 路径上被全部剥掉**（`core/responses_projection.py`）：
+  `SCHEMA_KEEP_KEYS` 里没有 `description`，而 `_project_tools()` 也只透传
+  `name`/`parameters`/`strict`。结果是经 `/v1/responses` 与 `/gw/v1/responses`
+  发出的**所有工具描述都从未到达上游**——这是既有缺陷，不是本次引入。
+  描述是模型判断「何时调用、怎么填参」的主要依据，剥掉会明显降低工具调用准确率。
+  现已在 schema 与工具级两个位置都完整保留。
 - **「Base URL 复制」按钮点了没反应**（`admin/static/index.html`）：`copyText()` 无条件调
   `i.select()`，但 Base URL 所在元素是 `<code>` 而非 `<input>` —— `<code>` 没有 `select()`，
   第一句就抛 `TypeError`，后面的剪贴板写入与 `toast("已复制")` 全执行不到。
@@ -28,6 +79,26 @@
   造成“看起来成功了其实没复制”——现在会回退到 `execCommand`，失败则明确报错。
 - **用量统计「今天」在凌晨会错成昨天**：`_usDateStr()` 原用 `toISOString()`（转 UTC），
   东八区下凌晨 0:00~8:00 会算出前一天。改为按本地时区逐字段拼接。
+- **`inject` 改为原子写**（`admin/routers/accounts.py`）：原先用
+  `open(target, "w")` 直接覆写桌面端的**活动登录文件**，一旦中途失败（磁盘满 /
+  文件被客户端占用）会留下截断的 `.info`，把用户客户端登录态弄坏且不可逆。
+  改为先写临时文件再 `os.replace`；`OSError` 翻译成带上下文的 500 提示，
+  明确告知原始登录态未被修改。
+
+### 安全
+
+- **前端 5 处 XSS 注入面**（`admin/static/index.html`）：动态数据未转义就拼进
+  `innerHTML`。逐处修复：
+  - `toast(msg)`：`msg` 常由服务端/上游字符串拼成（`注入失败: + d.detail`、
+    `测速失败(${modelId}): ${d.detail}`、备份文件路径等），是最直接的注入点。
+  - 注入成功提示里的备份文件路径：本机路径直接进 toast。
+  - 用量明细表头：**上游 JSON 的 key 名**直接进 `<th>`。
+  - 积分包周期字段：上游返回的 `cycle_start` / `cycle_end` / `deduction_end`
+    直接进 `<td>`（三处）。
+  - 本机账号扫描列表的失效时间 label（含日期拼接）。
+
+  均已过 `esc()` 转义。注：其余 `innerHTML` 站点经逐个核实为纯数字或静态 HTML
+  三元表达式（如 `${v>0?'text-amber-600':''}`），无注入面，未作无谓改动。
 
 ### 变更
 

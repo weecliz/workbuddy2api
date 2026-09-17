@@ -491,6 +491,49 @@ Anthropic 端点（`/v1/messages`）相关：
 | `ADMIN_UPSTREAM_CLIENT_KIND` | `workbuddy` | 凭据里 `auth.domain` 缺失时的兜底身份 |
 | `ADMIN_UA_WORKBUDDY` | `CLI/5.3.14 WorkBuddy/5.3.14` | 桌面端 UA。**版本号是按官方拼装规则与其 product.json 推断的**（桌面端不打印 API 请求头，无法从日志确认），升级客户端后请同步 |
 | `ADMIN_UA_CODECLI` | `CLI/2.148.0 CodeBuddy/2.148.0` | CLI UA。版本号来自本机真实请求日志，**实测确认** |
+| `ADMIN_DEVICE_FINGERPRINT` | `on` | 是否注入稳定设备指纹三头（见 §3.9）。仅作回滚逃生口，设 `off` 恢复改动前行为 |
+
+### 3.9 设备指纹头（`X-Machine-ID` / `X-Session-ID` / `X-Request-ID`）
+
+上面 §3.8 讨论的是 `X-Device-Token`（需本机 Turing SDK）。这里三个头是**另一套机制**，
+两者不要混：
+
+| | 来源 | 依赖 | 拿不到时 |
+| --- | --- | --- | --- |
+| `X-Device-Token` | 桌面端 Turing Shield SDK | **必须本机装桌面端** | 不注入该头 |
+| `X-Machine-ID` 等三头 | 账号 uid 纯哈希 | **无任何外部依赖** | —— |
+
+- **算法**（`core/fingerprint.py`）：`md5("<salt>:<uid>")[:36]`，salt 为 `machine` / `session` / `req`。
+  与参考实现 workbuddy2api-hub 的 `wb_fingerprint.py` **逐字对齐** —— 这一点是刻意的：
+  换端或混用同一号池时，同一 uid 必须派生出**相同**设备标识，否则同一账号在两套程序下
+  表现为两台不同设备，反而更容易被判定为异常登录。
+- **注入点**：`core/converter.py` 的 `CredentialManager._build_headers_from()`，
+  是对话 / 签到 / 猫猫旅行 / 活跃上报的**唯一共同出口**，一处改动全覆盖。
+- **为什么不像 `X-Device-Token` 那样做成「跟随可用性」**：两者机制无关（一个是 SDK、
+  一个是纯哈希），绑定只会让云端部署（拿不到 `X-Device-Token`）白白失去
+  「同账号设备稳定 + 多账号彼此隔离」这项收益。
+- **证据边界**：README §1.3 的逆向发现里**只有 `X-Device-Token`**，没有
+  `X-Machine-ID` / `X-Session-ID` 被上游校验的证据。因此这项的准确定位是
+  「与成熟项目行为一致的加固」，而非「已验证上游会校验这三个头」。
+- **回滚**：`.env` 设 `ADMIN_DEVICE_FINGERPRINT=off`。
+
+### 3.10 Codex 自由格式（custom）工具
+
+Codex CLI 的 `apply_patch` 用 Responses 的 `type: "custom"` 声明：没有 `parameters`，
+只有一个自由文本入参。上游 Chat 协议不认这个类型，需要三层协同处理
+（`core/responses_adapter.py`，缺任一层则整项失效）：
+
+1. **请求侧**：降级为「单个 `input` 字符串参数」的 function 工具，
+   并在 description 里注入「原样输出完整载荷、勿包 JSON / 勿加代码块」的提示；
+   `format.definition`（grammar）也一并附进 description 保留信息。
+2. **投影侧**：`_project_tools()` 与 `SCHEMA_KEEP_KEYS` 必须保留 `description`
+   —— 否则第 1 步注入的提示会被立刻剥掉，降级等于白做。
+3. **响应侧**：调用还原为 `custom_tool_call` 项 + `response.custom_tool_call_input.delta/done`
+   事件（**不发** `function_call_arguments.*`），并把 `{"input":"..."}` 拆回自由文本原文
+   —— Codex 认这个形状。
+
+> 未声明 custom 工具的请求（Chatbox / LobeChat 等普通 OpenAI 客户端）**行为完全不变**：
+> `custom_names` 为空集时走原路径。
 
 ---
 
