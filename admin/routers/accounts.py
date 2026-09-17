@@ -15,6 +15,7 @@ from admin.config import settings
 from admin.db import get_db
 from admin.models import Account
 from admin.security import require_admin
+from core.fingerprint import derive_id
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -81,6 +82,34 @@ def _refresh_balance(acc: Account) -> bool:
         return False
 
 
+def _token_expiry(auth_json: str) -> dict:
+    """从凭据里解析 token 到期时间，供账号列表展示。
+
+    两个字段语义不同，别混：
+      - ``refreshExpiresAt``：**真正下限**。access token 临近过期会被
+        ``CredentialManager._is_expired`` 自动刷新（提前 60s），所以 access 到期
+        本身不代表账号失效；只有 refresh token 也到期了，这个号才真不能再续。
+      - ``expiresAt``：当前 access token 的到期时刻，刷新后会变大，仅供参考。
+
+    时间戳均为**毫秒**；缺失 / 非数时一律返回 0，不猜不造。
+    """
+    try:
+        auth = (json.loads(auth_json) or {}).get("auth") or {}
+    except Exception:
+        return {"token_refresh_expires_ts": 0, "token_expires_ts": 0}
+
+    def _ms(v) -> int:
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "token_refresh_expires_ts": _ms(auth.get("refreshExpiresAt")),
+        "token_expires_ts": _ms(auth.get("expiresAt")),
+    }
+
+
 @router.get("")
 def list_accounts(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
     rows = db.query(Account).order_by(Account.id.desc()).all()
@@ -98,6 +127,11 @@ def list_accounts(_: bool = Depends(require_admin), db: Session = Depends(get_db
             "last_sync_at": a.last_sync_at.isoformat() if a.last_sync_at else None,
             "last_used_at": a.last_used_at.isoformat() if a.last_used_at else None,
             "created_at": a.created_at.isoformat() if a.created_at else None,
+            # 出站设备指纹（core/fingerprint.py）。按 uid 现算、不落库，
+            # 故这里必须用同一套函数，否则前端展示值与真实出站头会不一致。
+            "machine_id": derive_id(a.uid or "", "machine"),
+            "session_id": derive_id(a.uid or "", "session"),
+            **_token_expiry(a.auth_json),
         }
         for a in rows
     ]

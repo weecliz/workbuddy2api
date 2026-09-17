@@ -81,6 +81,7 @@ except ImportError:  # 模块缺失时降级为不脱敏
                          strip_tool_metadata=False):
         return body
 
+from .fingerprint import device_headers as _device_headers
 from .responses_adapter import (
     responses_request_to_chat,
     ResponsesStreamConverter,
@@ -134,6 +135,28 @@ _KIND_UA = {
     "workbuddy": os.getenv("ADMIN_UA_WORKBUDDY", "CLI/5.3.14 WorkBuddy/5.3.14"),
     "codebuddy": os.getenv("ADMIN_UA_CODECLI", "CLI/2.148.0 CodeBuddy/2.148.0"),
 }
+
+
+# ---------------------------------------------------------------------------
+# 设备指纹头（X-Machine-ID / X-Session-ID / X-Request-ID）
+#
+# 与 X-Device-Token 的区别（别混）：
+#   - X-Device-Token 由桌面端 Turing SDK 生成，**依赖本机安装**，容器 / 云端
+#     必然拿不到，取不到时就降级为不带该头；
+#   - 下面三个头由 uid 纯哈希派生（core/fingerprint.py），**不依赖任何外部组件**，
+#     任何部署环境都算得出来。
+#
+# 开关默认 on（对齐参考实现 workbuddy2api-hub 的「无条件注入」行为）。
+# 之所以不做「跟随 X-Device-Token 是否可得」的联动：两者机制无关，联动只会让
+# 云端部署（拿不到 Device-Token）白白失去「同账号设备稳定 + 多账号彼此隔离」
+# 这项收益，而这三个头不是官方客户端指纹、不涉及伪造官方特征。
+# 需要回滚时设 ADMIN_DEVICE_FINGERPRINT=off。
+# ---------------------------------------------------------------------------
+
+def device_fingerprint_enabled() -> bool:
+    """是否注入三个设备指纹头（默认开；仅 'off'/'0'/'false'/'no' 关闭）。"""
+    raw = (os.getenv("ADMIN_DEVICE_FINGERPRINT") or "on").strip().lower()
+    return raw not in ("off", "0", "false", "no")
 
 
 def client_kind_from_domain(domain: str | None) -> str:
@@ -304,6 +327,11 @@ class CredentialManager:
             tok = _get_turing_device_token()
             if tok:
                 h["X-Device-Token"] = tok
+        # 稳定设备指纹三头：纯 uid 哈希派生，不依赖 Turing SDK，任何身份、
+        # 任何部署环境都注入（含上一步拿不到 X-Device-Token 的云端场景）。
+        # 收益是「同账号设备长期稳定 + 多账号彼此隔离」；开关见 device_fingerprint_enabled()。
+        if device_fingerprint_enabled():
+            h.update(_device_headers(account.get("uid") or ""))
         return h
 
     def get_headers(self, extra: dict | None = None) -> dict:

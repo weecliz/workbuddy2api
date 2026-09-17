@@ -423,7 +423,29 @@ function fmtK(n) {
   if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
   return String(n);
 }
-
+/* 把毫秒时间戳转成「本地时区」的 YYYY-MM-DD HH:MM。
+   不用 fmtTime：那一个是为「上游返回的 UTC 字符串」写的，会再 +8h；
+   这里入参已经是绝对毫秒时间戳，再偏移会多算 8 小时。 */
+function fmtTs(ms, withSec = false) {
+  if (!ms) return "-";
+  const d = new Date(Number(ms));
+  if (isNaN(d.getTime())) return "-";
+  const p = (n) => String(n).padStart(2, "0");
+  const out = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return withSec ? out + ":" + p(d.getSeconds()) : out;
+}
+/* 剩余时长的人话描述（按小时/天分级）。返回 {text, tone}，tone 用于着色。 */
+function fmtRemain(ms) {
+  if (!ms) return { text: "未知", tone: "text-slate-300" };
+  const h = (Number(ms) - Date.now()) / 3600000;
+  if (h <= 0) return { text: "已失效", tone: "text-red-500 font-medium" };
+  if (h < 1) return { text: `${Math.max(1, Math.round(h * 60))}分钟后`, tone: "text-red-500 font-medium" };
+  if (h < 24) return { text: `${Math.round(h)}小时后`, tone: "text-amber-600 font-medium" };
+  const days = Math.floor(h / 24);
+  if (days < 7) return { text: `${days}天后`, tone: "text-amber-600" };
+  if (days < 30) return { text: `${days}天后`, tone: "text-slate-400" };
+  return { text: `${days}天后`, tone: "text-slate-400" };
+}
 function api(path, opts = {}) {
   opts.headers = Object.assign({ "X-Admin-Token": TOKEN }, opts.headers || {});
   return fetch(path, opts);
@@ -467,6 +489,40 @@ function _runModalCleanups() {
 }
 function openModal(html) { _runModalCleanups(); $("#modalBox").innerHTML = html; $("#modal").classList.remove("hidden"); $("#modal").classList.add("flex"); }
 function closeModal() { _runModalCleanups(); $("#modal").classList.add("hidden"); $("#modal").classList.remove("flex"); }
+function copyMachine(id){
+  /* 复制某账号的完整设备指纹。
+     刻意只把整数 id 插入 onclick，不把哈希字符串拼进 HTML 属性：
+     esc() 不转义单引号，而 onclick 属性用单引号包裹，拼字符串会形成注入面
+     （当前 machine_id 是 md5 十六进制、恰好不可注入，但不该依赖这个隐含前提）。 */
+  const a = (_accData || []).find(x => x.id === id);
+  copyRaw(a ? a.machine_id : "");
+}
+function copyRaw(text){
+  /* 按文本复制（copyText 按选择器取，不适合每行重复的元素）。
+     与 copyText 同一套回退：navigator.clipboard 只在安全上下文
+     （https / localhost）存在，局域网 http://ip:port 下为 undefined。 */
+  const t = (text || "").trim();
+  if(!t){ toast("没有可复制的内容", "err"); return; }
+  const fallback = () => {
+    const ta = document.createElement("textarea");
+    ta.value = t;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch(e) { ok = false; }
+    document.body.removeChild(ta);
+    return ok;
+  };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(t)
+      .then(() => toast("已复制"))
+      .catch(() => toast(fallback() ? "已复制" : "复制失败，请手动选中", fallback() ? "ok" : "err"));
+  } else {
+    toast(fallback() ? "已复制" : "复制失败，请手动选中", fallback() ? "ok" : "err");
+  }
+}
 function copyText(sel){
   /* 修复：目标可能是 <input>（有 .value/.select()）也可能是 <code> 等普通元素
      （没有 .select()，直接调会抛 TypeError，导致“点了没反应”）。
@@ -562,7 +618,24 @@ function accRow(a) {
         <div>${esc(a.name || "未命名")}</div>
         <div class="mt-1 text-[10px] text-slate-400" title="出站身份按凭据 domain 自动推断：*workbuddy* → 桌面端 UA，其它 → CLI UA">${esc(a.domain || "-")}</div>
       </td>
-      <td class="px-4 py-3 text-slate-500 font-mono text-xs">${esc(a.uid || "-")}</td>
+      <td class="px-4 py-3 text-slate-500 font-mono text-xs">
+        <div>${esc(a.uid || "-")}</div>
+        ${a.machine_id
+          ? `<div class="mt-1 flex items-center gap-1 text-[10px] text-slate-400" title="出站设备指纹 X-Machine-ID（由 uid 稳定派生，不随重启/重装变化）&#10;账号间彼此隔离，用于降低多号关联风控&#10;点击复制完整值">
+          <i class="fa-solid fa-microchip"></i>
+          <code class="cursor-pointer hover:text-indigo-600 select-all" onclick="copyMachine(${a.id})">${esc(a.machine_id.slice(0, 10))}…</code>
+        </div>`
+          : `<div class="mt-1 text-[10px] text-slate-300" title="本账号没有 uid，无法派生设备指纹（所有无 uid 账号会塌缩成同一个指纹、隔离失效）。">
+          <i class="fa-solid fa-microchip mr-1"></i>-</div>`}
+        ${(!a.uid && a.machine_id) ? `<div class="mt-1 text-[10px] text-amber-500" title="uid 缺失时派生函数会退化为固定串 anonymous，导致所有此类账号共享同一个 fingerprint，多账号隔离实际失效。"><i class="fa-solid fa-triangle-exclamation mr-1"></i>无 uid，指纹已塌缩</div>` : ""}
+        ${(() => {
+          const r = fmtRemain(a.token_refresh_expires_ts);
+          const abs = fmtTs(a.token_refresh_expires_ts);
+          const alt = a.token_expires_ts ? `\n当前 access token 到期：${fmtTs(a.token_expires_ts)}` : "";
+          return `<div class="mt-1 flex items-center gap-1 text-[10px] ${r.tone}" title="refresh token 到期时间（真正下限）：${abs}${alt}\n\naccess token 临近过期会自动续期，故它到期不意味着失效；refresh token 也到期后该账号才真的无法继续使用。">
+            <i class="fa-regular fa-clock"></i>${esc(r.text)}</div>`;
+        })()}
+      </td>
       <td class="px-4 py-3">${badge(a.status)}</td>
       <td class="px-4 py-3">${a.balance_total}</td>
       <td class="px-4 py-3 font-medium ${a.balance_remain>0?'text-emerald-600':'text-red-500'}">${a.balance_remain}</td>
