@@ -29,6 +29,7 @@ class AccountSession:
         # mkstemp 会返回已打开的 fd，这里立刻关掉（路径已经安全创建好了）。
         _fd, self._path = tempfile.mkstemp(suffix=".info")
         os.close(_fd)
+        # pi-lens-ignore: unchecked-throwing-call-python
         with open(self._path, "w", encoding="utf-8") as f:
             f.write(auth_json)
         self.cm = CredentialManager(Path(self._path))
@@ -48,16 +49,18 @@ class AccountSession:
         根本没有 _auth（真正存会话的是 _cached），一调用就抛 AttributeError。
         summary() 内部会先 _load_if_stale()，因此外部刷新过文件也能读到新值。
         """
+        # pi-lens-ignore: unchecked-throwing-call-python
         return int(self.cm.summary().get("token_expires_at") or 0)
 
     def updated_json(self) -> str:
+        # pi-lens-ignore: unchecked-throwing-call-python
         with open(self._path, "r", encoding="utf-8") as f:
             return f.read()
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
     def close(self):
@@ -158,3 +161,19 @@ class AccountSession:
 
     def report_chat_activity(self, conversation_id: str, request_id: str = "") -> None:
         return _growth.report_chat_activity(self.cm, conversation_id, request_id)
+
+    # -----------------------------------------------------------------------
+    # 成长任务中心（实现见 growth.py，契约对齐 hub wb_tasks.py）
+    # -----------------------------------------------------------------------
+
+    def fetch_tasks(self) -> list[dict]:
+        return _growth.fetch_tasks(self.cm)
+
+    def accept_tasks(self, codes: list[str]) -> None:
+        return _growth.accept_tasks(self.cm, codes)
+
+    def report_events(self, events: list[dict]) -> None:
+        return _growth.report_events(self.cm, events)
+
+    def claim_task(self, code: str) -> dict:
+        return _growth.claim_task(self.cm, code)

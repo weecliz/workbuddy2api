@@ -12,6 +12,33 @@
 
 ### 新增
 
+- **成长任务全自动完成引擎（growth_tasks）**：把 workbuddy2api-hub 的国内版成长
+  中心全链路移植进本项目——批量接取未接任务 → 按任务类型构造规范行为事件上报
+  点亮 → 自动调用领奖端点入账。接入现有 Schedule 框架（任务类型
+  `growth_tasks`，老实例升级时由 `ensure_growth_tasks` 幂等补种，默认每日 1 轮）。
+  - **事件规格与构造器**（`admin/tasks/event_specs.py`）：TASK_SPECS 覆盖
+    create_canvas / template_5 / expert_5 / Expert_team_use_3 / skill_1 /
+    automation_1 / playbook_prompt / Expert_lighthouse / Hp_Appearance / chat_5 /
+    Model_chat_GLM5.2 / black_cat 等；字段照抄 hub 全量不裁剪（防上游加严校验）。
+  - **明确跳过**：buddy5 / RichMeow / Library（hub 无事件分支，上报 heartbeat
+    点不亮）、first_buddy（领养归 cat_travel 管）、Expert_Philanthropy（真实捐款
+    不可伪造）及一切未知 task_code（不盲报）。
+  - **上游契约**（`admin/backend/growth.py`）：任务列表/接取带 `/v2` 前缀，
+    领奖 `POST /activity/growth/tasks/{code}/claim` **不带**（hub 实测口径，
+    不统一不猜测）；领奖用 `_request_backend_soft`，非 0 码只记录不中断。
+  - **风控口径**：账号间 0.8s（复用 ACCOUNT_DELAY）；同号上报条间
+    ADMIN_GROWTH_REPORT_GAP（默认 1.5s）；每号每日 1 轮；单任务只补足
+    target-current 缺口不超额刷；失败不重试留给下一轮；black_cat 仅
+    CST 23:00-08:00 点亮，白天跳过留给下一轮；总开关 ADMIN_GROWTH_TASK_ENABLED。
+  - **与 activity_report 的分工**：后者继续管 streak 连登与领猫解锁，
+    chat_5 进度两条链路都会推进（先到先得，无害）。
+  - **实测验证**（SeeU 单号真实执行一轮）：接取 8 / 上报 18 次 / 领奖 6 项 /
+    入账 800 积分；夜猫子白天正确跳过。两个实测发现（详见 README §5之二）：
+    专家类任务上游按真实使用**去重计数**（上报 5 次只走 3/5），单轮点不满、
+    靠每轮回读进度补缺口多轮收敛；接取后首次重拉进度可能滞后（异步记账），
+    同样靠回读机制自动兑住，均无需改代码。
+  - 测试：`tests/test_tasks_growth.py` 13 项（状态机分支 / 跳过规则 / 夜猫
+    时段边界 / 失败隔离 / 字段完整性 / 总开关）。
 - **admin 侧新增 `/health` 运维探活端点**（`admin/server.py`）：返回基本状态、
   converter 挂载状态、账号池摘要（total / active）与活跃 Key 数。**不要求鉴权**
   （探活 / 监控系统的常见约定），且不含凭据、token、账号 uid 等敏感信息。
