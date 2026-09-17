@@ -263,7 +263,11 @@ def _fetch_real_credits(log_id: int, account_id: int, auth_json: str, model: str
     匹配规则：[created_at-5min, created_at+5min] + model 取最近一条。
     """
     try:
-        sess = AccountSession(auth_json)
+        # 必须用 backend.AccountSession：本模块只 import 了 backend，没有裸导入
+        # AccountSession。写成裸名会在运行时抛 NameError，而它被本函数末尾的
+        # except Exception 吞掉、只留一行日志 —— 结果是「真实积分回写」静默失效，
+        # 扣费全部退回估算口径（与实际账单不符）。
+        sess = backend.AccountSession(auth_json)
         try:
             start = (created_at - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
             end = (created_at + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")

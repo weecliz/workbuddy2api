@@ -12,6 +12,13 @@
 
 ### 修复
 
+- **「真实积分回写」从未生效**（`admin/routers/proxy.py`）：`_fetch_real_credits()` 里
+  写的是裸名 `AccountSession(auth_json)`，但本模块只 `import backend`、从未裸导入该名字，
+  运行时必抛 `NameError`；而它被函数末尾的 `except Exception` 吞掉、只在日志里留一行
+  traceback —— 因此这个功能**一直是静默失效的**：上游真实用量查不到，扣费全部退回
+  `COST_PER_TOKEN` 估算口径，与实际账单不符。已改为 `backend.AccountSession(...)`。
+  该缺陷由 pi-lens 的 `reportUndefinedVariable` 报出（此前容易被同文件近百条 SQLAlchemy
+  `Column` 类型误报淹没，误当噪音忽略——它不是类型误报，是真 bug）。
 - **「Base URL 复制」按钮点了没反应**（`admin/static/index.html`）：`copyText()` 无条件调
   `i.select()`，但 Base URL 所在元素是 `<code>` 而非 `<input>` —— `<code>` 没有 `select()`，
   第一句就抛 `TypeError`，后面的剪贴板写入与 `toast("已复制")` 全执行不到。
