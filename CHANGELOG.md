@@ -84,6 +84,16 @@
   文件被客户端占用）会留下截断的 `.info`，把用户客户端登录态弄坏且不可逆。
   改为先写临时文件再 `os.replace`；`OSError` 翻译成带上下文的 500 提示，
   明确告知原始登录态未被修改。
+- **调度器 `_loop()` 的 `db` 未绑定**（`admin/scheduler.py`）：`SessionLocal()`
+  自身抛异常时（数据库不可用 / 驱动问题），`db` 从未绑定，而 `except` 分支里
+  还要调 `db.close()` —— 会抛 `NameError: cannot access local variable 'db'`，
+  且被同一个 `except` 吞掉。后果不是调度线程挂掉（它照常睡 15 秒继续），而是
+  **真实错误被掩盖**，日志上看不出到底为什么没干活。已改为先置 `db = None`
+  再判空关闭。
+- **`_run_one()` 的 `task=None` 类型不匹配**（`admin/scheduler.py`）：`task` 列在
+  库里可空（历史遗留），而 `run_task()` 声明 `task: str`。已给空串兜底，
+  被归为「未知任务类型」记入 `last_result`，不会静默失败。
+
 ### 安全
 
 - **前端 5 处 XSS 注入面**（`admin/static/index.html`）：动态数据未转义就拼进

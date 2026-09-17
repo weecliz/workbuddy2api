@@ -53,7 +53,9 @@ def run_task(task: str, db, schedule: "Schedule | None" = None) -> dict:
 
 def _run_one(s: Schedule, db, now: datetime):
     try:
-        result = run_task(s.task, db, s)
+        # task 列在库里可空（历史遗留），但业务上必有值；给个空串兜底，
+        # run_task 会把它归为「未知任务类型」并记入 last_result，不会静默失败。
+        result = run_task(s.task or "", db, s)
         s.last_result = json.dumps(result, ensure_ascii=False)[:2000]
     except Exception as e:  # 单个任务失败不影响调度循环
         s.last_result = f"执行失败: {e}"[:2000]
@@ -64,18 +66,24 @@ def _run_one(s: Schedule, db, now: datetime):
 
 def _loop():
     while True:
+        # db 必须先置 None：SessionLocal() 自身可能抛异常（数据库不可用 / 驱动问题），
+        # 那样 db 就未绑定，而下面 except 里还要用它 —— 直接调会抛 NameError，
+        # 把真实错误盖掉（调度线程看似照常跑，实质问题没人知道）。
+        db = None
         try:
             db = SessionLocal()
             now = datetime.utcnow()
             for s in db.query(Schedule).filter(Schedule.enabled == 1).all():
                 if s.next_run_at is None or s.next_run_at <= now:
                     _run_one(s, db, now)
-            db.close()
         except Exception:
-            try:
-                db.close()
-            except Exception:
-                pass
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+        else:
+            db.close()
         time.sleep(15)
 
 
