@@ -296,12 +296,25 @@ def inject_to_client(acc_id: int, body: InjectIn, _: bool = Depends(require_admi
         raise HTTPException(status_code=500, detail=f"客户端登录目录不存在: {d}")
     target = os.path.join(d, "workbuddy-desktop.info")
     backup = None
-    if os.path.exists(target):
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup = target + f".bak-{ts}"
-        shutil.copy2(target, backup)
-    with open(target, "w", encoding="utf-8") as f:
-        f.write(acc.auth_json)
+    try:
+        if os.path.exists(target):
+            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup = target + f".bak-{ts}"
+            shutil.copy2(target, backup)
+        # 原子写：先写临时文件再 os.replace。直接覆写活动登录文件的话，
+        # 一旦中途失败（磁盘满 / 文件被桌面端占用）会留下截断的 .info，
+        # 把用户客户端登录态弄坏 —— 而这是不可逆的。
+        tmp = target + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(acc.auth_json)
+        os.replace(tmp, target)
+    except OSError as e:
+        # 把系统错误翻译成可操作的提示，而不是抛出无上下文的 500。
+        raise HTTPException(
+            status_code=500,
+            detail=f"写入客户端登录文件失败（{target}）：{e}。"
+                   f"请确认桌面端未占用该文件、且目录可写。原始登录态未被修改。",
+        )
     return {"ok": True, "target": target, "backup": backup, "account": acc.name, "uid": acc.uid}
 
 

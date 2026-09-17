@@ -463,7 +463,9 @@ function toast(msg, type = "ok") {
   const box = $("#toasts");
   const el = document.createElement("div");
   el.className = "toast-item" + (isErr ? " is-err" : "");
-  el.innerHTML = `<i class="fa-solid ${isErr ? "fa-circle-exclamation" : "fa-circle-check"}"></i><div>${msg}</div>`;
+  /* msg 可能含服务端/上游返回的字符串（错误详情、文件路径、模型名等），
+     直接拼进 innerHTML 会形成 XSS 注入面 —— 先转义再插入。 */
+  el.innerHTML = `<i class="fa-solid ${isErr ? "fa-circle-exclamation" : "fa-circle-check"}"></i><div>${esc(msg)}</div>`;
   box.appendChild(el);
 
   // 最多留 4 条，多了把最早的挤掉，避免刷屏时糊满整屏
@@ -680,7 +682,7 @@ async function injectAcc(id){
   if(!confirm("确认把该账号注入到本机 WorkBuddy 客户端？\n会先自动备份当前活动登录态（*.bak-时间戳）。")) return;
   const r = await api("/api/accounts/"+id+"/inject",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirm:true})});
   const d = await r.json().catch(()=>({}));
-  if(r.ok){ toast(`已注入到本机客户端（备份: ${d.backup?d.backup.split(/[\\/]/).pop():"无"}）`); }
+  if(r.ok){ const bk = d.backup ? String(d.backup).split(/[\\/]/).pop() : "无"; toast(`已注入到本机客户端（备份: ${bk}）`); }
   else { toast("注入失败: "+(d.detail||""), "err"); }
 }
 
@@ -719,9 +721,9 @@ async function viewCreditDetails(id){
               <td class="px-3 py-2 ${p.remain>0?'text-emerald-600':'text-slate-400'}">${p.remain}${isExpired?' <span class="text-[10px] text-red-500 font-bold">已过期</span>':''}</td>
               <td class="px-3 py-2 text-slate-500">${p.account_remain||0}</td>
               <td class="px-3 py-2 text-slate-500">${p.used||0}</td>
-              <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">${p.cycle_start || '-'}</td>
-              <td class="px-3 py-2 text-xs whitespace-nowrap ${isExpired&&!p.deduction_end?'text-red-500':''}">${p.cycle_end || '-'}</td>
-              <td class="px-3 py-2 text-xs whitespace-nowrap ${isExpired&&p.deduction_end?'text-red-500':''}">${p.deduction_end || (p.deduction_end_ts?'永不过期':'-')}</td>
+              <td class="px-3 py-2 text-xs text-slate-400 whitespace-nowrap">${esc(p.cycle_start || '-')}</td>
+              <td class="px-3 py-2 text-xs whitespace-nowrap ${isExpired&&!p.deduction_end?'text-red-500':''}">${esc(p.cycle_end || '-')}</td>
+              <td class="px-3 py-2 text-xs whitespace-nowrap ${isExpired&&p.deduction_end?'text-red-500':''}">${esc(p.deduction_end || (p.deduction_end_ts?'永不过期':'-'))}</td>
               <td class="px-3 py-2"><div class="w-24 h-2 bg-slate-200 rounded-full overflow-hidden"><div class="h-full ${p.remain>0?(isExpired?'bg-amber-500':'bg-emerald-500'):'bg-red-400'}" style="width:${pct}%"></div></div> <span class="text-[10px] text-slate-400">${pct}%</span></td></tr>`;
           }).join('') : '<tr><td colspan="9" class="px-3 py-6 text-center text-slate-400">无积分包数据</td></tr>'
         }</tbody></table>
@@ -777,7 +779,7 @@ async function doLoadRequestUsage(page){
     const table = `
       <div class="rounded-lg border overflow-x-auto">
         <table class="w-full text-xs min-w"><thead class="bg-slate-50 text-slate-500 sticky top-0"><tr>${
-          sortedKeys.map(k => `<th class="px-2 py-1.5 text-left whitespace-nowrap">${_RU_FIELD_MAP[k]||k}</th>`).join('')
+          sortedKeys.map(k => `<th class="px-2 py-1.5 text-left whitespace-nowrap">${esc(_RU_FIELD_MAP[k]||k)}</th>`).join('')
         }</tr></thead><tbody>${arr.map(it => `<tr class="border-t hover:bg-slate-50">${
           sortedKeys.map(k => {
             let v = it[k];
@@ -841,7 +843,7 @@ async function scanLocal(){
           </div>
         </div>
       </td>
-      <td class="px-3 py-2.5 text-xs ${expired?'text-red-500 font-medium':'text-slate-500'} whitespace-nowrap">${label}</td>
+      <td class="px-3 py-2.5 text-xs ${expired?'text-red-500 font-medium':'text-slate-500'} whitespace-nowrap">${esc(label)}</td>
       <td class="px-3 py-2.5 text-right">
         <div class="flex flex-wrap items-center justify-end gap-1.5">
           ${it.is_active?'<span class="px-2 py-0.5 rounded-full text-[10px] bg-emerald-100 text-emerald-700">当前</span>':''}
