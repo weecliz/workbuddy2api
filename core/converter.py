@@ -85,6 +85,7 @@ from .fingerprint import device_headers as _device_headers
 from .responses_adapter import (
     responses_request_to_chat,
     ResponsesStreamConverter,
+    custom_tool_names,
 )
 from .responses_projection import project_responses_chat_body
 from .anthropic_adapter import (
@@ -1012,6 +1013,10 @@ async def create_response(request: Request,
     if "stream_options" not in chat_body:
         chat_body["stream_options"] = {"include_usage": True}
 
+    # 客户端声明的 custom（自由格式）工具名，供响应侧还原 custom_tool_call 事件。
+    # 必须从原始 payload 取：chat_body 里这些工具的 type 已被改写成 function。
+    chat_custom_names = custom_tool_names(payload.get("tools"))
+
     chat_body = _chat_body_desensitize(chat_body)
 
     client_wants_stream = payload.get("stream", True)  # Codex CLI 默认 stream
@@ -1038,7 +1043,7 @@ async def create_response(request: Request,
 
     if client_wants_stream:
         return StreamingResponse(
-            _stream_responses(url, headers, chat_body, model_name, t0, rid),
+            _stream_responses(url, headers, chat_body, model_name, t0, rid, chat_custom_names),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -1049,7 +1054,7 @@ async def create_response(request: Request,
         if status_code != 200:
             _log(f"[{rid}] ✗ HTTP {status_code} | {model_name} | {_truncate(raw.decode('utf-8','replace'),200)}")
             raise HTTPException(status_code=status_code, detail=_safe_err_raw(raw, status_code))
-        converter = ResponsesStreamConverter(model=model_name)
+        converter = ResponsesStreamConverter(model=model_name, custom_names=chat_custom_names)
         for line in raw.decode("utf-8", "replace").splitlines():
             converter.feed_line(line)
         chat_body = final_body
@@ -1067,9 +1072,10 @@ async def create_response(request: Request,
 
 
 async def _stream_responses(url: str, headers: dict, body: dict,
-                            model_name: str = "?", t0: float = 0.0, rid: str = ""):
+                            model_name: str = "?", t0: float = 0.0, rid: str = "",
+                            custom_names=None):
     """消费后端 Chat SSE，实时转换为 Responses API 事件流输出。"""
-    converter = ResponsesStreamConverter(model=model_name)
+    converter = ResponsesStreamConverter(model=model_name, custom_names=custom_names)
     prefix = f"[{rid}] " if rid else ""
 
     try:

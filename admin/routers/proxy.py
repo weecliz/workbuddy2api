@@ -39,12 +39,17 @@ _CREDIT_DELAY_S = 60
 
 # Responses API 适配器（converter 同款）；缺失时 /v1/responses 优雅降级为 501
 try:
-    from core.responses_adapter import responses_request_to_chat, ResponsesStreamConverter
+    from core.responses_adapter import (
+        responses_request_to_chat,
+        ResponsesStreamConverter,
+        custom_tool_names,
+    )
     from core.responses_projection import project_responses_chat_body
     _RESPONSES_AVAILABLE = True
 except Exception:  # pragma: no cover - 降级分支
     _RESPONSES_AVAILABLE = False
     responses_request_to_chat = None
+    custom_tool_names = None
     ResponsesStreamConverter = None
     project_responses_chat_body = None
 
@@ -1046,6 +1051,12 @@ async def responses_proxy(
     chat_body, _stats = project_responses_chat_body(chat_body)
     chat_body.setdefault("model", "auto")
     chat_body["stream"] = True
+    # 客户端声明为 custom（自由格式）的工具名。请求里这些工具已被降级成带单个
+    # input 参数的 function 工具发往上游；记录名字是为了在响应侧把它们的调用
+    # 还原成 custom_tool_call + custom_tool_call_input.* 事件（Codex 认这个形状，
+    # 否则 apply_patch 这类自由格式工具无法被识别）。
+    # 必须从**原始 payload** 取：投影后的 chat_body 里 type 已经是 function 了。
+    chat_custom_names = custom_tool_names(payload.get("tools"))
     opts = dict(chat_body.get("stream_options") or {})
     opts["include_usage"] = True
     chat_body["stream_options"] = opts
@@ -1075,7 +1086,8 @@ async def responses_proxy(
 
         def make_consumer():
             async def consume(r, att):
-                converter = ResponsesStreamConverter(model=model_name)
+                converter = ResponsesStreamConverter(model=model_name,
+                                                     custom_names=chat_custom_names)
                 for line in r.text.splitlines():
                     if not line.strip():
                         continue
@@ -1109,7 +1121,8 @@ async def responses_proxy(
     # 协议回调：Responses SSE —— Chat 事件经 ResponsesStreamConverter 转换后转发
     def make_consumer():
         async def consume(r, att):
-            converter = ResponsesStreamConverter(model=model_name)
+            converter = ResponsesStreamConverter(model=model_name,
+                                                 custom_names=chat_custom_names)
             att.usage_join = "\n"
             async for line in r.aiter_lines():
                 if not line.strip():

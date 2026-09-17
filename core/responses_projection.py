@@ -98,6 +98,11 @@ SCHEMA_KEEP_KEYS = {
     "minLength",
     "maxLength",
     "nullable",
+    # description 必须保留：工具与参数的说明是模型判断「何时调用、怎么填参」的
+    # 主要依据，剥掉会明显降低工具调用准确率。custom（自由格式）工具降级后
+    # 靠它携带「原样输出载荷、勿包 JSON」的提示（见 responses_adapter.CUSTOM_TOOL_HINT），
+    # 剥掉就等于降级失效。参考实现 workbuddy2api-hub 也是完整保留描述。
+    "description",
 }
 
 
@@ -360,6 +365,9 @@ def _project_tools(tools: list[dict]) -> tuple[list[dict], dict]:
             continue
 
         projected_function: dict[str, Any] = {"name": name}
+        # 工具级描述同样必须保留（原因见 SCHEMA_KEEP_KEYS 旁的注释）。
+        if function.get("description"):
+            projected_function["description"] = function["description"]
         if "parameters" in function:
             projected_function["parameters"] = _project_schema(function.get("parameters"))
         if "strict" in function:
