@@ -93,9 +93,20 @@
 - **`_run_one()` 的 `task=None` 类型不匹配**（`admin/scheduler.py`）：`task` 列在
   库里可空（历史遗留），而 `run_task()` 声明 `task: str`。已给空串兜底，
   被归为「未知任务类型」记入 `last_result`，不会静默失败。
+  同一问题也存在于**手动触发**路径（`admin/routers/schedules.py` 的 `run_now`）
+  与列表接口的 `TASK_LABELS.get(s.task, ...)`，已一并对齐。
+- **`AccountSession.get_token_expiry()` 一调用就抛 `AttributeError`**
+  （`admin/backend/session.py`）：它读的是 `self.cm._auth`，但 `CredentialManager`
+  上**根本没有 `_auth` 属性**（真正存会话 dict 的是 `_cached`）。改用公开的
+  `cm.summary()["token_expires_at"]` —— 既避免摸私有属性，也因为 summary()
+  内部先 `_load_if_stale()`，外部刷新过 auth 文件时能读到新值。
 
 ### 安全
 
+- **`/gw` 的 API Key 校验改为定长比较**（`core/converter.py`）：`_check_auth()`
+  原先写 `token != key`，比较在第一个不同字节就返回，耗时随匹配前缀长度变化，
+  构成可测量的时序旁路。改用 `hmac.compare_digest` —— 同项目的
+  `admin/security.py`（密码校验、Key 校验）早已统一用该做法，此处是漏网的一处。
 - **前端 5 处 XSS 注入面**（`admin/static/index.html`）：动态数据未转义就拼进
   `innerHTML`。逐处修复：
   - `toast(msg)`：`msg` 常由服务端/上游字符串拼成（`注入失败: + d.detail`、

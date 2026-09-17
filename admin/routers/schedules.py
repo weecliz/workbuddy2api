@@ -58,7 +58,7 @@ def list_schedules(_: bool = Depends(require_admin), db: Session = Depends(get_d
             "id": s.id,
             "name": s.name,
             "task": s.task,
-            "task_label": TASK_LABELS.get(s.task, s.task),
+            "task_label": TASK_LABELS.get(s.task or "", s.task or ""),
             "interval_minutes": s.interval_minutes,
             "enabled": bool(s.enabled),
             "last_run_at": s.last_run_at.isoformat() if s.last_run_at else None,
@@ -130,7 +130,9 @@ def run_now(sid: int, _: bool = Depends(require_admin), db: Session = Depends(ge
     if not s:
         raise HTTPException(status_code=404, detail="任务不存在")
     now = datetime.utcnow()
-    _run = run_task(s.task, db, s)
+    # task 列在库里可空（历史遗留），与 scheduler._run_one 同样做空串兜底，
+    # 免得手动触发时因 None 报错。
+    _run = run_task(s.task or "", db, s)
     s.last_run_at = now
     s.next_run_at = now + timedelta(minutes=s.interval_minutes or 60)
     s.last_result = __import__("json").dumps(_run, ensure_ascii=False)[:2000]

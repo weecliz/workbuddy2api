@@ -41,9 +41,14 @@ class AccountSession:
         return self.cm.get_headers(extra=extra)
 
     def get_token_expiry(self) -> int:
-        """返回 token 到期时间戳（毫秒），0 表示未知。"""
-        auth = self.cm._auth or {}
-        return auth.get("expiresAt") or 0
+        """返回 token 到期时间戳（毫秒），0 表示未知。
+
+        用 CredentialManager 的公开 summary() 取 token_expires_at，而不是直接
+        摸私有属性 —— 这里曾写作 `self.cm._auth`，但 CredentialManager 上
+        根本没有 _auth（真正存会话的是 _cached），一调用就抛 AttributeError。
+        summary() 内部会先 _load_if_stale()，因此外部刷新过文件也能读到新值。
+        """
+        return int(self.cm.summary().get("token_expires_at") or 0)
 
     def updated_json(self) -> str:
         with open(self._path, "r", encoding="utf-8") as f:

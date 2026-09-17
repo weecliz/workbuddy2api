@@ -22,6 +22,7 @@ workbuddy2api — 把 CodeBuddy / WorkBuddy 的订阅暴露成标准 OpenAI 兼�
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import re
@@ -547,12 +548,15 @@ def _check_auth(authorization: Optional[str], x_api_key: Optional[str]):
     key = CONFIG["api_key"]
     if not key:
         return
-    token = ""
+    # 用 hmac.compare_digest 做定长比较，而不是 `token != key` —— 后者在第一个
+    # 不同字节就返回，比较耗时随匹配前缀长度变化，构成可测量的时序旁路。
+    # 同项目的 admin/security.py 已统一用 compare_digest（密码校验、Key 校验）。
+    supplied = ""
     if authorization and authorization.startswith("Bearer "):
-        token = authorization[7:].strip()
-    if not token and x_api_key:
-        token = x_api_key
-    if token != key:
+        supplied = authorization[7:].strip()
+    if not supplied and x_api_key:
+        supplied = x_api_key
+    if not hmac.compare_digest(supplied, key):
         raise HTTPException(status_code=401, detail={"error": {"message": "invalid api key", "type": "auth_error"}})
 
 
