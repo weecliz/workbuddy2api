@@ -226,7 +226,7 @@ converter.py  (FastAPI)
 | `POST /v1/messages` | Anthropic Messages（适配 Claude Code / CC Switch） | 已支持 |
 | `GET /v1/models` | 实时拉取后端模型，失败回退内置列表 | 已支持 |
 | `GET /v1/balance` | 当前账号积分额度 | 已支持 |
-| `GET /health` | 健康检查（含余额摘要） | 已支持 |
+| `GET /health` | 健康检查（含余额摘要）。单端口部署下为 **`/gw/health`**；admin 侧另有独立的 `/health`（返回账号池摘要，不需鉴权） | 已支持 |
 
 ### 2.3 设备风控头提供器
 

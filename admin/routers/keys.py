@@ -49,7 +49,7 @@ def list_keys(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
             "id": k.id,
             "name": k.name,
             "key_prefix": k.key_prefix,
-            "masked": _mask(k.key_prefix + "****************"),
+            "masked": _mask((k.key_prefix or "") + "****************"),
             "credit_limit": k.credit_limit,
             "credit_used": k.credit_used,
             "unlimited": bool(k.unlimited),
@@ -94,7 +94,7 @@ def view_key(key_id: int, _: bool = Depends(require_admin), db: Session = Depend
     k = db.query(ApiKey).filter(ApiKey.id == key_id).first()
     if not k:
         raise HTTPException(status_code=404, detail="Key 不存在")
-    raw = _decode_key(k.key_full)
+    raw = _decode_key(k.key_full or "")
     if not raw:
         raise HTTPException(status_code=410, detail="该 Key 创建于「查看功能」上线前，完整值未存储。建议重新生成一个新 Key。")
     return {
@@ -112,13 +112,18 @@ def key_usage(key_id: int, _: bool = Depends(require_admin), db: Session = Depen
     k = db.query(ApiKey).filter(ApiKey.id == key_id).first()
     if not k:
         raise HTTPException(status_code=404, detail="Key 不存在")
-    pct = ((k.credit_used / k.credit_limit) * 100) if k.credit_limit > 0 and not k.unlimited else None
+    # credit_limit / credit_used 的列定义允许 NULL（旧数据 / 手工插入），
+    # 直接做算术会抛 TypeError，把整个端点变成 500。统一把 NULL 视为 0：
+    # 与 ORM 建行时的 default=0 语义一致。
+    limit = k.credit_limit or 0
+    used = k.credit_used or 0
+    pct = ((used / limit) * 100) if limit > 0 and not k.unlimited else None
     return {
         "id": k.id,
         "name": k.name,
         "credit_limit": k.credit_limit,
-        "credit_used": round(k.credit_used, 2),
-        "credit_remaining": (round(max(0, k.credit_limit - k.credit_used), 2) if not k.unlimited else None),
+        "credit_used": round(used, 2),
+        "credit_remaining": (round(max(0, limit - used), 2) if not k.unlimited else None),
         "usage_percent": round(pct, 1) if pct is not None else None,
         "unlimited": bool(k.unlimited),
         "status": k.status,
@@ -134,7 +139,10 @@ def patch_key(key_id: int, body: dict, _: bool = Depends(require_admin), db: Ses
     if "name" in body:
         k.name = body["name"]
     if "credit_limit" in body:
-        k.credit_limit = float(body["credit_limit"])
+        try:
+            k.credit_limit = float(body["credit_limit"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="credit_limit 不是合法数字")
     if "unlimited" in body:
         k.unlimited = 1 if body["unlimited"] else 0
     if "status" in body and body["status"] in ("active", "revoked"):

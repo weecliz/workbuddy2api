@@ -1,5 +1,6 @@
 """管理后台 FastAPI 入口：登录、挂载路由、托管前端静态页、启动时建库建表。"""
 import logging
+import sys
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
@@ -164,6 +165,35 @@ def change_password(body: PasswordChangeIn, _: bool = Depends(require_admin)):
     finally:
         db.close()
     return {"ok": True}
+
+
+@app.get("/health")
+def health():
+    """运维探活端点（README §2.2 曾记载但 admin 侧从未注册）。
+
+    返回基本状态 + 账号池摘要，**不要求鉴权**：探活/监控系统的常见约定。
+    不含凭据、不含 token、不含账号 uid 等敏感信息。
+    """
+    info: dict = {
+        "status": "ok",
+        "platform": sys.platform,
+        "python": sys.version.split()[0],
+    }
+    # converter(/gw) 挂载状态
+    info["converter_embedded"] = _CONVERTER_EMBEDDED
+    # 数据库连通性（不做写操作，只做一次轻量 SELECT）
+    try:
+        db = SessionLocal()
+        from admin.models import Account, ApiKey
+        info["accounts"] = {
+            "total": db.query(Account).count(),
+            "active": db.query(Account).filter(Account.status == "active").count(),
+        }
+        info["api_keys"] = db.query(ApiKey).filter(ApiKey.status == "active").count()
+        db.close()
+    except Exception as e:
+        info["database_error"] = str(e)
+    return info
 
 
 @app.get("/")

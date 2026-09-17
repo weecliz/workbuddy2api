@@ -12,6 +12,11 @@
 
 ### 新增
 
+- **admin 侧新增 `/health` 运维探活端点**（`admin/server.py`）：返回基本状态、
+  converter 挂载状态、账号池摘要（total / active）与活跃 Key 数。**不要求鉴权**
+  （探活 / 监控系统的常见约定），且不含凭据、token、账号 uid 等敏感信息。
+  此前 README §2.2 声称 `GET /health` 已支持，但该端点只定义在
+  `core/converter.py`（独立运行或 `/gw` 前缀下），admin 侧从未注册。
 - **稳定设备指纹三头**（`core/fingerprint.py`）：向上游请求注入 `X-Machine-ID` /
   `X-Session-ID` / `X-Request-ID`，由账号 uid 纯哈希派生（`md5("<salt>:<uid>")[:36]`）。
   - **与账号绑定、与部署环境无关**：不依赖桌面端或 Turing SDK，因此容器 / Sealos
@@ -100,6 +105,19 @@
   上**根本没有 `_auth` 属性**（真正存会话 dict 的是 `_cached`）。改用公开的
   `cm.summary()["token_expires_at"]` —— 既避免摸私有属性，也因为 summary()
   内部先 `_load_if_stale()`，外部刷新过 auth 文件时能读到新值。
+- **`check_quota` 在 `credit_limit` / `credit_used` 为 NULL 时抛 TypeError**
+  （`admin/security.py`）：这两列的列定义允许 NULL（旧数据 / 手工插入），
+  而 `check_quota` 是每个 `/v1` 请求的必经路径。一旦某把 Key 的这两列为 NULL，
+  该 Key 的**所有请求都会 500**。已统一把 NULL 视为 0：与 ORM 建行时的
+  `default=0` 语义一致（无限额视为 0 额度 → 402 拒绝，即安全默认）。
+- **`keys.py` 多处同类 NULL 崩溃**（`admin/routers/keys.py`）：
+  `/api/keys/{id}/usage` 的 pct 除法 / `round()` / 剩余计算（三处）、
+  `/api/keys` 的 `masked` 拼接（`key_prefix` 可为 NULL）、
+  `/api/keys/{id}/view` 的 `_decode_key(None)`。
+  已全部对齐空串 / 空值兜底。
+- **`patch_key` 的非法 `credit_limit` 直接抛 500**（`admin/routers/keys.py`）：
+  `float(body["credit_limit"])` 对非数字字符串抛 `ValueError`，原封不动传给
+  FastAPI 变成 500。改为返回 400 并告知字段名。
 
 ### 安全
 

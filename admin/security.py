@@ -80,10 +80,15 @@ def get_key_row(db, api_key: str) -> ApiKey | None:
 
 
 def check_quota(key: ApiKey) -> None:
-    """超额则直接拒绝，提示『积分已耗尽』。"""
+    """超额则直接拒绝，提示『积分已耗尽』。
+
+    credit_limit / credit_used 的列定义允许 NULL（旧数据、手工插入），
+    而 `None >= None` 会抛 TypeError，把该 Key 的所有 /v1 请求变成 500。
+    这里统一把 NULL 视为 0：与 ORM 建行时的 default=0 语义一致。
+    """
     if key.status != "active":
         raise HTTPException(status_code=403, detail={"error": {"message": "API Key 已停用", "type": "key_disabled"}})
-    if not key.unlimited and key.credit_used >= key.credit_limit:
+    if not key.unlimited and (key.credit_used or 0) >= (key.credit_limit or 0):
         raise HTTPException(
             status_code=402,
             detail={"error": {"message": "积分已耗尽", "type": "quota_exceeded"}},
