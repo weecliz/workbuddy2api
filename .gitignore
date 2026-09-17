@@ -63,6 +63,18 @@ test_anthropic_adapter.py
 test_responses_adapter.py
 scripts/test_daily_checkin.py
 
+# ===== 参考项目目录（本地对照用，不入库） =====
+# 内含 workbuddy2api / workbuddy2api-hub 两份参考实现（各带自己的 .git），
+# 仅用于对比功能差异，不属于本项目产物；入库会把它们的 git 仓库一起带进来。
+原项目/
+
+# ===== 临时工作目录（不入库）=====
+# 所有临时文件一律放这里：提交前拆分改动的脚本、一次性校验脚本、中间产物等。
+# 约定见 AGENTS.md 「临时文件」一节。.tmp/ 被包含在镜像与打包脚本里时请自行排除。
+.tmp/
+# pi-lens 扫描时生成的临时规则文件（不进版本库）
+.gitleaks.toml
+
 # ===== 强制保留（即便以点开头也要提交） =====
 !.gitignore
 !.env.example
