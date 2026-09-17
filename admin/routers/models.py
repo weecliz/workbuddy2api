@@ -5,13 +5,14 @@
   2. 在列表中启用/禁用特定模型
   3. 代理转发时自动过滤不在白名单内的模型
 """
-import httpx
+
 import json
 import time
-from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from admin import backend
@@ -43,10 +44,15 @@ def _get_enabled_models(db: Session) -> set[str]:
 
 def _get_free_models(db: Session) -> set[str]:
     """获取当前启用且免费的模型 ID 集合（credit_multiplier == 0）。"""
-    rows = db.query(ModelConfig).filter(
-        ModelConfig.enabled == 1,
-        (ModelConfig.credit_multiplier == 0) | (ModelConfig.credit_multiplier.is_(None))
-    ).all()
+    rows = (
+        db.query(ModelConfig)
+        .filter(
+            ModelConfig.enabled == 1,
+            (ModelConfig.credit_multiplier == 0)
+            | (ModelConfig.credit_multiplier.is_(None)),
+        )
+        .all()
+    )
     return {m.model_id for m in rows}
 
 
@@ -63,15 +69,22 @@ def _is_model_allowed(db: Session, model_id: str) -> bool:
 
 @router.get("/configs")
 def list_configs(
-    level: Optional[str] = None,
+    level: str | None = None,
     _: bool = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
-    """列出所有模型配置。"""
+    """列出所有模型配置（启用的在前，再按倍率从低到高）。
+
+    COALESCE 兜底 NULL：两列都可为空，而各方言对 NULL 的排序位置不一致。
+    """
     q = db.query(ModelConfig)
     if level:
         q = q.filter(ModelConfig.level == level)
-    rows = q.order_by(ModelConfig.id.asc()).all()
+    rows = q.order_by(
+        func.coalesce(ModelConfig.enabled, 0).desc(),
+        func.coalesce(ModelConfig.credit_multiplier, 0).asc(),
+        ModelConfig.id.asc(),
+    ).all()
     return {
         "items": [
             {
@@ -95,11 +108,15 @@ def _do_sync_models(db: Session) -> dict:
 
     需要一个有效账号来调用后端 API；优先选 active 且余额 > 0 的账号。
     """
-    acc = db.query(Account).filter(
-        Account.status == "active", Account.balance_remain > 0
-    ).first()
+    acc = (
+        db.query(Account)
+        .filter(Account.status == "active", Account.balance_remain > 0)
+        .first()
+    )
     if not acc:
-        raise HTTPException(status_code=503, detail="无可用账号（无法连接后端获取模型列表）")
+        raise HTTPException(
+            status_code=503, detail="无可用账号（无法连接后端获取模型列表）"
+        )
     try:
         with backend.AccountSession(acc.auth_json) as sess:
             models_raw = sess.fetch_models()
@@ -256,9 +273,12 @@ async def speed_test(
     messages = body.get("messages") or _SPEED_TEST_PROMPT
 
     # 选可用账号（与代理一致：active 且余额>0，剩余最多优先）
-    acc = db.query(Account).filter(
-        Account.status == "active", Account.balance_remain > 0
-    ).order_by(Account.balance_remain.desc()).first()
+    acc = (
+        db.query(Account)
+        .filter(Account.status == "active", Account.balance_remain > 0)
+        .order_by(Account.balance_remain.desc())
+        .first()
+    )
     if not acc:
         raise HTTPException(status_code=503, detail="无可用账号（全部禁用或额度耗尽）")
 
@@ -296,7 +316,9 @@ async def speed_test(
                     msg = detail.decode("utf-8", "replace")[:300]
                     _persist()
                     sess.close()
-                    raise HTTPException(status_code=r.status_code, detail=f"上游返回错误: {msg}")
+                    raise HTTPException(
+                        status_code=r.status_code, detail=f"上游返回错误: {msg}"
+                    )
                 async for chunk in r.aiter_text():
                     # TTFT：首个非空增量（content 或 reasoning_content）即首字延迟
                     if ttft is None and chunk.strip():
@@ -324,9 +346,11 @@ async def speed_test(
                             delta = ch.get("delta") or {}
                             # 推理类模型把思考内容放在 reasoning_content（content 可能为空），
                             # 样例优先取 content，缺省回退 reasoning_content，保证总能看到输出。
-                            piece = (delta.get("content") or "") or (delta.get("reasoning_content") or "")
+                            piece = (delta.get("content") or "") or (
+                                delta.get("reasoning_content") or ""
+                            )
                             if piece and sample_len < 400:
-                                add = piece[:400 - sample_len]
+                                add = piece[: 400 - sample_len]
                                 sample += add
                                 sample_len += len(add)
             t_end = time.perf_counter()
@@ -343,8 +367,16 @@ async def speed_test(
     total_dur = t_end - t0
     gen_dur = (total_dur - ttft) if ttft is not None else total_dur
     gen_dur = max(gen_dur, 0.0)
-    speed_tps = round(completion_tokens / gen_dur, 2) if completion_tokens and gen_dur > 0 else None
-    overall_tps = round(completion_tokens / total_dur, 2) if completion_tokens and total_dur > 0 else None
+    speed_tps = (
+        round(completion_tokens / gen_dur, 2)
+        if completion_tokens and gen_dur > 0
+        else None
+    )
+    overall_tps = (
+        round(completion_tokens / total_dur, 2)
+        if completion_tokens and total_dur > 0
+        else None
+    )
     ttft_ms = round(ttft * 1000, 1) if ttft is not None else None
 
     meta = backend.parse_auth_meta(acc.auth_json)
