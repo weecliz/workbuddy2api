@@ -13,7 +13,7 @@ from admin.config import settings
 from admin.db import ensure_database, init_db, SessionLocal
 from admin.db_config import db_config
 from admin.models import SystemSetting
-from admin.routers import accounts, keys, logs, models, oauth, proxy, schedules, sync, usage
+from admin.routers import accounts, growth, keys, logs, models, oauth, proxy, schedules, sync, usage
 from admin.ratelimit import clear_failures, get_client_ip, is_locked, record_failure
 from admin.security import (
     create_admin_token,
@@ -67,6 +67,7 @@ async def _security_headers(request: Request, call_next):
 
 app.include_router(accounts.router)
 app.include_router(oauth.router)
+app.include_router(growth.router)
 app.include_router(keys.router)
 app.include_router(models.router)
 app.include_router(proxy.router)
@@ -122,6 +123,11 @@ def _get_stored_hash() -> str:
 def login(
     username: str = Form(...),
     password: str = Form(...),
+    # 注解必须写成裸 Request（不能写 Request | None）：FastAPI 靠这个注解做
+    # 依赖注入，写成 Request | None 会被当成 Pydantic 字段并在注册路由时抛
+    # FastAPIError（实测：在 add_api_route 阶段直接崩，登录端点无法启动）。
+    # 函数体内用 `if request else None` 守卫，允许无 Request 上下文调用。
+    # pi-lens-ignore: reportArgumentType
     request: Request = None,
 ):
     ip = get_client_ip(
@@ -250,4 +256,7 @@ if _CONVERTER_EMBEDDED:
             "任何能访问本端口的人都能消耗账号额度。建议在 .env 中设置。"
         )
 
+    # converter_app 在降级分支（core.converter 导入失败）为 None，但整个块由
+    # L214 的 `if _CONVERTER_EMBEDDED:` 守卫，None 分支不会执行。
+    # pi-lens-ignore: reportArgumentType
     app.mount("/gw", converter_app)

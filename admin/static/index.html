@@ -645,6 +645,7 @@ function accRow(a) {
       <td class="px-4 py-3 text-slate-400 text-xs whitespace-nowrap">${fmtTime(a.last_sync_at)}</td>
       <td class="px-4 py-3 text-right whitespace-nowrap">
         <button onclick="viewCreditDetails(${a.id})" class="text-amber-600 hover:text-amber-800 mr-1" title="查看积分明细"><i class="fa-solid fa-list-ul"></i></button>
+        <button onclick="viewGrowthTasks(${a.id})" class="text-teal-600 hover:text-teal-800 mr-1" title="成长任务进度 / 手动补跑"><i class="fa-solid fa-seedling"></i></button>
         <button onclick="viewRequestUsage(${a.id})" class="text-blue-600 hover:text-blue-800 mr-1" title="请求用量"><i class="fa-solid fa-chart-line"></i></button>
         <button onclick="injectAcc(${a.id})" class="text-violet-600 hover:text-violet-800 mr-1" title="注入到本机客户端"><i class="fa-solid fa-right-to-bracket"></i></button>
         <button onclick="refreshAcc(${a.id})" class="text-indigo-600 hover:text-indigo-800 mr-1" title="刷新余额"><i class="fa-solid fa-rotate"></i></button>
@@ -1540,6 +1541,18 @@ function scheduleResultSummary(s){
     parts.push(`每号 ${obj.count_per_account||1} 条`);
     if(obj.failed) parts.push(`失败 ${obj.failed}`);
     if(obj.streak_warn && obj.streak_warn.length) parts.push(`连登可疑 ${obj.streak_warn.length}`);
+  } else if(s.task === "growth_tasks"){
+    // 注：后端 TASK_CHOICES 新增类型时，这里与下方 scheduleForm 的下拉都要同步。
+    if(obj.skipped) parts.push(`已跳过（${esc(obj.skipped)}）`);
+    else {
+      parts.push(`接取 ${obj.accepted||0}`);
+      parts.push(`点亮 ${obj.lit||0}`);
+      parts.push(`领奖 ${obj.claimed||0}`);
+      parts.push(`<span class="text-emerald-600 font-medium">+${obj.earned_credit||0}</span>`);
+      if(obj.failed) parts.push(`<span class="text-red-500">失败 ${obj.failed}</span>`);
+      const warn = (obj.accounts||[]).filter(a => a.warning).length;
+      if(warn) parts.push(`<span class="text-amber-600" title="有账号本轮一步未动，上游可能改版">无进展 ${warn}</span>`);
+    }
   } else {
     parts.push(esc(raw.slice(0,120)));
   }
@@ -1582,7 +1595,11 @@ async function toggleSchedule(id){ await api("/api/schedules/"+id+"/toggle",{met
 async function delSchedule(id){ if(!confirm("确认删除该任务？"))return; const r=await api("/api/schedules/"+id,{method:"DELETE"}); toast(r.ok?"已删除":"失败",r.ok?"ok":"err"); if(r.ok) loadSchedules(); }
 function scheduleForm(title, data){
   data = data || {};
-  const tasks = [["refresh_balances","刷新平台总积分"],["sync_models","同步模型列表"],["daily_checkin","每日签到领取积分"],["cat_travel","猫猫旅行巡检"],["activity_report","对话活跃上报"]];
+  const tasks = [["refresh_balances","刷新平台总积分"],["sync_models","同步模型列表"],["daily_checkin","每日签到领取积分"],["cat_travel","猫猫旅行巡检"],["activity_report","对话活跃上报"],["growth_tasks","成长任务点亮领奖"]];
+  /* 必须与后端 TASK_CHOICES（admin/routers/schedules.py）保持一致。
+     曾漏过 growth_tasks：不仅无法新建该任务，更严重的是**编辑**已有成长任务时
+     这个下拉匹配不到选项，浏览器会回落到第一项，保存即静默把任务类型改成
+     了「刷新平台总积分」。 */
   const opts = tasks.map(t=>`<option value="${t[0]}" ${data.task===t[0]?'selected':''}>${t[1]}</option>`).join("");
   const saVal = (data.stop_after||"").slice(0,16); // 适配 <input type="datetime-local">
   const isCheckin = data.task==="daily_checkin";
@@ -1619,6 +1636,150 @@ async function submitSchedule(id){
   else { r = await api("/api/schedules",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}); }
   if(r.ok){ closeModal(); loadSchedules(); toast("已保存"); }
   else { const d=await r.json().catch(()=>({})); toast("保存失败: "+(d.detail||""),"err"); }
+}
+
+/* ==================== 成长中心（单号进度 + 手动补跑） ==================== */
+/* 两个后端接口（admin/routers/growth.py）：
+     GET  /api/growth/accounts/{id}/tasks  只读拉该号任务清单（约 1~2s，不打写接口）
+     POST /api/growth/run                 异步补跑，返回 job_id（单号约 40~60s，
+                                          同步跑会撞 nginx 60s 超时）
+   因为加了 esc() 转义与明确的 action 文案；后端 event_specs 决定哪些任务可自动。 */
+const _growthActionMeta = {
+  actionable: { t: "可补跑", c: "bg-emerald-100 text-emerald-700" },
+  claimable:  { t: "待领奖", c: "bg-amber-100 text-amber-700" },
+  night:      { t: "待夜间", c: "bg-indigo-100 text-indigo-700" },
+  manual:     { t: "需人工", c: "bg-slate-100 text-slate-500" },
+  done:       { t: "已领取", c: "bg-slate-100 text-slate-400" },
+};
+
+async function viewGrowthTasks(id){
+  // 名称不经 onclick 传参（昵称可能含引号会截断内联 JS），从已加载缓存取
+  const name = (_accData.find(a => a.id === id) || {}).name || "";
+  openModal(`<h3 class="font-bold mb-1"><i class="fa-solid fa-seedling mr-1 text-teal-600"></i> 成长任务 — ${esc(name)}</h3>
+    <p class="text-xs text-slate-400 mb-3">正在拉取任务清单（约 1~2 秒，只读，不会领奖）...</p>
+    <div id="growthBody"></div>`);
+  try {
+    const r = await api("/api/growth/accounts/" + id + "/tasks");
+    const { ok, data: d } = await safeJson(r);
+    // 纯文本错误消息用 textContent（不走 HTML 解析，天然无注入面）
+    if (!r.ok) { const b = $("#growthBody"); if (b) b.textContent = `获取失败: ${d.detail || "未知错误"}`; return; }
+    renderGrowthTasks(id, name, d);
+  } catch (e) {
+    const b = $("#growthBody"); if (b) b.textContent = `请求异常: ${e.message}`;
+  }
+}
+
+function renderGrowthTasks(id, name, d){
+  const s = d.summary || {};
+  const rows = (d.tasks || []).map(t => {
+    const meta = _growthActionMeta[t.action] || _growthActionMeta.manual;
+    const pct = t.target > 0 ? Math.min(100, Math.round(t.current / t.target * 100)) : 0;
+    const bar = t.action === "actionable"
+      ? `<div class="flex items-center gap-1.5"><div class="h-1.5 w-14 rounded-full bg-slate-200 overflow-hidden"><div class="h-full rounded-full bg-emerald-500" style="width:${pct}%"></div></div><span class="text-[11px] text-slate-500">${t.current}/${t.target}</span></div>`
+      : `<span class="text-[11px] text-slate-400">${t.current}/${t.target}</span>`;
+    return `<tr class="border-t">
+      <td class="px-2 py-2">${esc(t.name)}<div class="text-[10px] text-slate-400 font-mono">${esc(t.code)}</div></td>
+      <td class="px-2 py-2">${bar}</td>
+      <td class="px-2 py-2 text-xs">${t.reward > 0 ? "<span class=\"text-amber-600\">+" + t.reward + "</span>" : "-"}</td>
+      <td class="px-2 py-2"><span class="px-2 py-0.5 rounded-full text-[10px] ${meta.c}">${meta.t}</span></td>
+      <td class="px-2 py-2 text-[11px] text-slate-400">${esc(t.note || "")}</td>
+    </tr>`;
+  }).join("") || `<tr><td colspan="5" class="px-2 py-6 text-center text-slate-400">该账号没有任务</td></tr>`;
+
+  // 可补跑的件数：决定是否值得点「补跑」（纯粹是省一次无意义的往返）
+  const todo = (s.actionable || 0) + (s.claimable || 0);
+  // 这里必须用 innerHTML：渲染的是任务表格（tr/td/进度条）这类结构，
+  // textContent 无法表达。所有动态字段（t.name/t.code/t.note）均已过 esc()，
+  // 与页面其它面板（账号表 / 日志表）的同一约定一致。
+  // pi-lens-ignore: no-inner-html-js
+  $("#growthBody").innerHTML = `
+    <div class="flex flex-wrap gap-2 mb-2 text-xs">
+      <span class="px-2 py-1 rounded-lg bg-slate-50 text-slate-600">共 ${s.total || 0} 项</span>
+      <span class="px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700">可推进 ${s.actionable || 0}</span>
+      <span class="px-2 py-1 rounded-lg bg-amber-50 text-amber-700">待领 ${s.claimable || 0}${s.claimable_credit ? "（+" + s.claimable_credit + "）" : ""}</span>
+      <span class="px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700">待夜间 ${s.night_pending || 0}</span>
+      <span class="px-2 py-1 rounded-lg bg-slate-50 text-slate-500">需人工 ${s.manual || 0}</span>
+      <span class="px-2 py-1 rounded-lg bg-slate-50 text-slate-400">已领 ${s.claimed || 0}</span>
+    </div>
+    <div class="max-h-[46vh] overflow-auto border rounded-lg">
+      <table class="w-full text-sm">
+        <thead class="bg-slate-50 text-slate-500 text-left sticky top-0"><tr>
+          <th class="px-2 py-2">任务</th><th class="px-2 py-2">进度</th>
+          <th class="px-2 py-2">奖励</th><th class="px-2 py-2">状态</th><th class="px-2 py-2">说明</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <div id="growthProgress" class="mt-3"></div>
+    <div class="flex justify-between items-center mt-3 gap-2">
+      <p class="text-xs text-slate-400">上表仅为当前进度快照。补跑会真实上报事件与领奖（消耗该账号额度）。</p>
+      <div class="flex gap-2 shrink-0">
+        <button onclick="closeModal()" class="px-3 py-1.5 rounded-lg border text-sm">关闭</button>
+        <button onclick="runGrowth([${id}], true)" class="px-3 py-1.5 rounded-lg border text-sm"
+          title="先重新拉一次任务清单，能看到最新进度"><i class="fa-solid fa-rotate mr-1"></i>刷新</button>
+        <button onclick="runGrowth([${id}], false)" class="px-3 py-1.5 rounded-lg btn-primary text-sm"
+          ${todo ? "" : "disabled title=\"当前没有可推进或可领取的任务\""}><i class="fa-solid fa-play mr-1"></i>补跑该账号${todo ? "（" + todo + " 项）" : ""}</button>
+      </div>
+    </div>`;
+}
+
+/* 触发补跑并轮询进度。ids 为账号 id 数组，空数组表示全部 active 账号。
+   refreshOnly=true 表示只想刷新清单（仍会走补跑，因后端无「只读全量」端点）*/
+async function runGrowth(ids, refreshOnly){
+  const who = !ids || !ids.length ? "全部启用账号" : (ids.length + " 个账号");
+  if(!refreshOnly && !confirm(`确认对 ${who} 执行成长任务补跑？\n\n会真实向上游上报事件并领取奖励（消耗该账号额度），过程约 40~60 秒/账号。`)) return;
+  const r = await api("/api/growth/run", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({account_ids: ids || []})});
+  const { ok, data: d } = await safeJson(r);
+  if(!ok){ toast("启动失败: " + esc(d.detail || ""), "err"); return; }
+  if(d.reused) toast("已有补跑在执行，已接上它的进度", "ok");
+  const box = $("#growthProgress");
+  // 同上：进度条是结构而非文本，动态值只有数字与已 esc() 的账号名。
+  // pi-lens-ignore: no-inner-html-js
+  if(box) box.innerHTML = `
+    <div class="rounded-lg border p-3">
+      <div class="flex justify-between text-xs text-slate-500 mb-1">
+        <span id="growthPhase">${esc(d.phase || "准备中")}</span>
+        <span id="growthCount">${d.done||0} / ${d.total||0}</span>
+      </div>
+      <div class="h-2 rounded-full bg-slate-200 overflow-hidden">
+        <div id="growthBar" class="h-full rounded-full bg-teal-500 transition-all" style="width:${d.percent||0}%"></div>
+      </div>
+      <div id="growthCurrent" class="text-xs text-slate-400 mt-1">${d.current ? "正在处理: " + esc(d.current) : ""}</div>
+    </div>`;
+  pollGrowth(d.job_id, ids);
+}
+
+function pollGrowth(jobId, ids){
+  const timer = setInterval(async () => {
+    try {
+      const r = await api("/api/growth/job/" + jobId);
+      const { ok, data: d } = await safeJson(r);
+      if(!ok){
+        clearInterval(timer);
+        if($("#growthPhase")) $("#growthPhase").textContent = "进度查询失败（任务可能已完成并过期）";
+        return;
+      }
+      if($("#growthBar")) $("#growthBar").style.width = (d.percent||0) + "%";
+      if($("#growthCount")) $("#growthCount").textContent = `${d.done||0} / ${d.total||0}`;
+      if($("#growthCurrent")) $("#growthCurrent").textContent = d.current ? "正在处理: " + d.current : "";
+      if($("#growthPhase")){
+        const res = d.result || {};
+        $("#growthPhase").textContent = d.status === "running"
+          ? (d.phase || "执行中")
+          : (d.status === "failed" ? "失败: " + (d.error || "")
+             : `完成 · 接${res.accepted||0}/点亮${res.lit||0}/领${res.claimed||0}/+${res.earned_credit||0}`);
+      }
+      if(d.status !== "running"){
+        clearInterval(timer);
+        // 完成后回读一次清单，让弹窗里的进度变成补跑后的真实值
+        if(ids && ids.length === 1) setTimeout(() => viewGrowthTasks(ids[0]), 600);
+        else loadAccounts();
+      }
+    } catch(e) { clearInterval(timer); }
+  }, 1500);
+  // 弹窗关闭时停轮询，避免定时器泄漏（沿用页面既有的 _modalCleanups 机制）
+  _modalCleanups.push(() => clearInterval(timer));
 }
 
 /* ==================== 用量日志（服务端分页） ==================== */

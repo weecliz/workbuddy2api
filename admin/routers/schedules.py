@@ -1,4 +1,5 @@
 """定时任务管理：列表 / 新增 / 修改 / 删除 / 启停 / 立即运行。"""
+import json
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -7,8 +8,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from admin.db import get_db
+from admin.jobrunner import KEY_GROWTH, RUNNER
 from admin.models import Schedule
-from admin.scheduler import run_task
+from admin.scheduler import LAST_RESULT_MAX, run_task
 from admin.security import require_admin
 
 router = APIRouter(prefix="/api/schedules", tags=["schedules"])
@@ -130,13 +132,20 @@ def run_now(sid: int, _: bool = Depends(require_admin), db: Session = Depends(ge
     s = db.query(Schedule).filter(Schedule.id == sid).first()
     if not s:
         raise HTTPException(status_code=404, detail="任务不存在")
+    # 成长任务：手动补跑（/api/growth/run）在跑时不能双开 —— 两路会同时
+    # 遍历同一批账号、双倍打上游并并发写回 auth_json。这里与
+    # scheduler._run_one 用同一把钥匙（见 admin/jobrunner.KEY_GROWTH）。
+    if s.task == "growth_tasks" and RUNNER.is_running(KEY_GROWTH):
+        raise HTTPException(
+            status_code=409,
+            detail="已有成长任务补跑在执行，请等它结束或改用「成长中心」页查看进度")
     now = datetime.utcnow()
     # task 列在库里可空（历史遗留），与 scheduler._run_one 同样做空串兜底，
     # 免得手动触发时因 None 报错。
     _run = run_task(s.task or "", db, s)
     s.last_run_at = now
     s.next_run_at = now + timedelta(minutes=s.interval_minutes or 60)
-    s.last_result = __import__("json").dumps(_run, ensure_ascii=False)[:2000]
+    s.last_result = json.dumps(_run, ensure_ascii=False)[:LAST_RESULT_MAX]
     db.commit()
     return {"id": s.id, "result": _run}
 

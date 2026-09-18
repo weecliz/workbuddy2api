@@ -22,8 +22,15 @@ import time
 from datetime import datetime, timedelta
 
 from admin.db import SessionLocal
+from admin.jobrunner import KEY_GROWTH, RUNNER
 from admin.models import Schedule
 from admin.tasks import run_activity_report, run_cat_travel, run_daily_checkin, run_growth_tasks
+
+#: last_result 落库前的截断长度。
+#: 从 2000 提到 8000：成长任务现在要存**按账号维度的汇总**（accounts 数组），
+#: 10 个账号的逐号对象就超过 2000，被截断后 JSON 不完整、前端 JSON.parse 失败
+#: （表现为结果栏只剩半截文本）。路由侧同一常量见 admin/routers/schedules.py。
+LAST_RESULT_MAX = 8000
 
 
 def run_task(task: str, db, schedule: "Schedule | None" = None) -> dict:
@@ -55,13 +62,25 @@ def run_task(task: str, db, schedule: "Schedule | None" = None) -> dict:
 
 
 def _run_one(s: Schedule, db, now: datetime):
+    # 成长任务与「手动补跑」（/api/growth/run）可能撞车：两路同时遍历同一批账号
+    # 会双倍打上游（风控面翻倍）并并发写回同一个 auth_json（后写覆盖先写，
+    # 丢掉对方的 token 刷新）。jobrunner 的同 key 只能防「两次手动」，
+    # 防不住「手动 vs 定时」，故在此让路。
+    if s.task == "growth_tasks" and RUNNER.is_running(KEY_GROWTH):
+        s.last_result = json.dumps(
+            {"task": "growth_tasks",
+             "skipped": "已有手动补跑在执行，本轮跳过"}, ensure_ascii=False)
+        s.last_run_at = now
+        s.next_run_at = now + timedelta(minutes=s.interval_minutes or 60)
+        db.commit()
+        return
     try:
         # task 列在库里可空（历史遗留），但业务上必有值；给个空串兜底，
         # run_task 会把它归为「未知任务类型」并记入 last_result，不会静默失败。
         result = run_task(s.task or "", db, s)
-        s.last_result = json.dumps(result, ensure_ascii=False)[:2000]
+        s.last_result = json.dumps(result, ensure_ascii=False)[:LAST_RESULT_MAX]
     except Exception as e:  # 单个任务失败不影响调度循环
-        s.last_result = f"执行失败: {e}"[:2000]
+        s.last_result = f"执行失败: {e}"[:LAST_RESULT_MAX]
     s.last_run_at = now
     s.next_run_at = now + timedelta(minutes=s.interval_minutes or 60)
     db.commit()
