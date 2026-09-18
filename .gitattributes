@@ -1,0 +1,6 @@
+# Windows batch files MUST keep CRLF in the working tree.
+# cmd misparses LF-only .bat files (comment words get executed as
+# commands, elevation checks false-positive), so pin the eol here
+# regardless of each machine's core.autocrlf setting.
+*.bat text eol=crlf
+*.cmd text eol=crlf
