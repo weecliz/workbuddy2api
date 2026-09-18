@@ -10,8 +10,51 @@
 - **修复** Fixed：缺陷修复
 - **安全** Security：凭据、权限、泄露相关
 
+## [未发布]
+
 ### 新增
 
+- **成长中心单账号手动补跑（P1）**：成长任务原先只有定时任务一个入口，
+  **只能跑全量**——无法针对单个账号补跑、看不到逐号进度、结果还被截断。
+  本次把「单账号」提升为一等公民（`admin/routers/growth.py`，新挂载于 `admin/server.py`）：
+  - `GET /api/growth/accounts/{id}/tasks` — **只读**拉该号任务清单并分类
+    （可推进 / 待领奖 / 待夜间 / 需人工 / 已领取），不接取、不上报、不领奖。
+  - `POST /api/growth/run` — 异步补跑，立即返回 `job_id`；空 `account_ids` = 全部
+    启用账号，空 `task_codes` = 全部可自动任务。
+  - `GET /api/growth/job/{job_id}`、`GET /api/growth/status` — 进度轮询与恢复。
+  - **为什么必须异步**：单号约 40~60 秒（同号事件上报条间还有 1.5s 间隔），
+    十几个账号就是十几分钟；同步跑会先撞 nginx 的 `proxy_read_timeout`(60s)，
+    前端吃 504、体感是「点了没反应」。这是 P1 的前置条件，只加按钮解决不了。
+- **后台任务执行器 `admin/jobrunner.py`**（从参考实现移植并精简）：`Job` / `JobRunner`
+  / 全局 `RUNNER`，支持 job_id、进度快照、心跳（`beat`，「正在处理 xxx」）、
+  同 key 去重。未移植 `wait_for` —— 现有编排用固定 gap + 每轮回读收敛，
+  不需要「轮询到就绪」，不做无调用者的死代码。
+- **成长任务按账号维度汇总**：`run_growth_tasks` 返回新增 `accounts`
+  （每号的 `accepted/lit/claimed/earned_credit/scanned/done_tasks/skipped_night`
+  /`summary`/`warning`/`error`）、`accounts_total`、`accounts_failed`、`truncated`。
+  前端定时任务页「上次结果」现按账号展示，不再只有一行全局计数。
+- **有序互斥（三层）**：`RUNNER` 同 key 去重（防重复点击叠并发）+ 任务内
+  `_RUN_LOCK` 非阻塞锁（抢不到即让路，不排队）+ 调度侧 `RUNNER.is_running()` 检查。
+  三层缺一不可：jobrunner 只防得住「两次手动」，防不住「手动 vs 定时」——
+  那会双倍打上游（风控面翻倍）并并发写回同一 `auth_json`（后写覆盖先写，
+  丢掉对方的 token 刷新）。
+
+### 变更
+
+- **成长任务编排抽出单号入口**（`admin/tasks/growth_tasks.py`）：原来的循环体
+  内联在 `run_growth_tasks` 里，无法单独调用。现拆为
+  `run_growth_for_account(acc, task_codes)` + 全量遍历，**手动补跑与定时调度
+  共用同一份编排逻辑** —— 参考实现的 `run_accounts` docstring 记过一次真实坑：
+  绕过 accept 落库等待单独实现「单号快跑」会导致任务判不完成。两者一旦分叉，
+  行为差异极难排查。同时：单任务异常改为逐条隔离（原先只护到账号级；
+  领奖异常曾会中断同号剩余任务），并新增 `warning`（有待办却一步未动 →
+  上游可能改版的信号，会显示在定时任务页）。
+- `admin/tasks/__init__.py` 导出 `run_growth_for_account` / `describe_account_tasks`。
+
+### 文档
+
+- **`docs/TASKS.md` §五之二**：补「按账号汇总」与「单账号手动补跑」两节，
+  含接口清单、互斥语义、以及为什么必须异步。
 - **成长任务全自动完成引擎（growth_tasks）**：把 workbuddy2api-hub 的国内版成长
   中心全链路移植进本项目——批量接取未接任务 → 按任务类型构造规范行为事件上报
   点亮 → 自动调用领奖端点入账。接入现有 Schedule 框架（任务类型
@@ -145,6 +188,26 @@
 - **`patch_key` 的非法 `credit_limit` 直接抛 500**（`admin/routers/keys.py`）：
   `float(body["credit_limit"])` 对非数字字符串抛 `ValueError`，原封不动传给
   FastAPI 变成 500。改为返回 400 并告知字段名。
+
+### 修复
+
+- **前端定时任务下拉漏了 `growth_tasks`，编辑即静默改坏任务类型**
+  （`admin/static/index.html`）：后端 `TASK_CHOICES` 有 6 项，前端下拉只有 5 项。
+  除了无法新建成长任务，**更严重的是编辑**：`data.task="growth_tasks"` 匹配不到
+  任何 `<option>`，按 HTML 规范 select 落到第一项，保存即把任务类型静默改成
+  「刷新平台总积分」——成长任务从此消失且无任何报错。
+- **成长任务结果不可见**：`scheduleResultSummary` 缺少 `growth_tasks` 分支，
+  落到 `else` 裸截断 120 字符，`lit/claimed/earned_credit` 一个都看不到。
+  现新增分支（接取 / 点亮 / 领奖 / +积分 / 失败 / 无进展账号数）。
+- **`last_result` 截断上限 2000 → 8000**（`admin/scheduler.py` 抽为
+  `LAST_RESULT_MAX`，`admin/routers/schedules.py` 共用同一常量）：新增的按账号
+  汇总在 10 个账号时就会超过 2000，截断后 JSON 不完整、前端 `JSON.parse` 失败
+  （表现为结果栏只剩半截文本）。全量结果默认**不带**逐任务 `detail`
+  （`include_detail=False`），避免 13 个账号轻易撑爆该上限；手动补跑的 job
+  存内存，传 `True` 以支持弹窗逐任务展示。
+- **`schedules/{sid}/run` 与手动补跑撞车**（`admin/routers/schedules.py`）：
+  该端点原先不查运行态，会与 `/api/growth/run` 同时遍历同一批账号。现返回
+  **409** 并给出可操作提示；调度线程侧则记 `last_result` 后跳过本轮。
 
 ### 安全
 

@@ -70,6 +70,86 @@ PYTHONPATH=. python scripts/test_daily_checkin.py
 - `admin/tasks/growth_tasks.py` — 编排：接取 → 点亮 → 领奖，单号异常隔离
 - `tests/test_tasks_growth.py` — 状态机分支 / 跳过规则 / 夜猫时段 / 失败隔离单测
 
+### 按账号维度汇总
+
+全量跑完一轮后，结果按**账号**聚合，不再只是一行全局计数。落库的
+`schedules.last_result` 与异步 job 都返回同一形状：
+
+```jsonc
+{
+  "task": "growth_tasks",
+  "accepted": 8, "lit": 18, "claimed": 6, "earned_credit": 800,
+  "failed": 1,
+  "accounts_total": 13, "accounts_failed": 1, "truncated": false,
+  "accounts": [
+    {"account_id": 3, "name": "SeeU", "ok": true,
+     "accepted": 8, "lit": 18, "claimed": 6, "earned_credit": 800,
+     "scanned": 17, "done_tasks": 6, "skipped_night": 1,
+     "summary": "接8/点亮18/领6/+800", "warning": null, "error": null}
+  ],
+  "details": ["acc3:接8/点亮18/领6/+800"]   // 兼容旧阅读习惯的单行文本
+}
+```
+
+两个要注意的点：
+
+- **`warning`**：某号「有待办任务但一步没动」时为 `本轮无进展(上游改版?)`，
+  定时任务页会显示「无进展 N」。这是上游改版的**最早信号**，比等用户报障快。
+  若该号待办全是夜猫子且当前不在夜间窗口，则不告警（那是预期行为）。
+- **逐任务 `detail` 默认不返回**（`include_detail=False`）。原因：`last_result`
+  落库前截断 8000 字符（`scheduler.LAST_RESULT_MAX`），13 个账号 × 每号几十条
+  detail 会轻易超限，截断后 JSON 不完整、前端 `JSON.parse` 失败（表现为结果栏
+  只剩半截文本）。需要逐任务明细时走手动补跑的 job（存内存，不怕大）。
+
+### 单账号手动补跑（P1）
+
+原先前只能跑全量。现在「账号」页每行有 **做成长任务** 图标（`fa-seedling`），
+点开即拉该号实时任务清单并分类：
+
+| 分类 | 含义 | 补跑能解决吗 |
+| --- | --- | --- |
+| `actionable` 可补跑 | 未接取 / 未达标 | ✅ 能推进 |
+| `claimable` 待领奖 | 已完成未领 | ✅ 能立刻拿分 |
+| `night` 待夜间 | 夜猫子任务，不在 23:00-08:00 | ❌ 白天也点不亮 |
+| `manual` 需人工 | 不可伪造（公益捐款）/ 归其它任务管（领猫） | ❌ 补跑无用 |
+| `done` 已领取 | 本轮已领 | — |
+
+分类由 `describe_account_tasks` 给出，其判定分支**与编排逐条对齐** ——
+否则会出现「界面说可补跑、点了却什么都不做」。
+
+接口（`admin/routers/growth.py`）：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/growth/accounts/{id}/tasks` | **只读**拉清单 + 分类 + summary |
+| `POST` | `/api/growth/run` | 异步补跑，返回 `job_id`（空 ids = 全部启用账号）|
+| `GET` | `/api/growth/job/{job_id}` | 进度轮询（默认含逐号明细）|
+| `GET` | `/api/growth/status` | 是否有补跑在跑（进页面时恢复进度条）|
+
+#### 为什么必须异步
+
+单号约 40~60 秒（同号事件上报条间 1.5s），十几个账号就是十几分钟。同步跑会先撞
+nginx 的 `proxy_read_timeout`(60s)，前端吃 504、体感是「点了没反应」。
+所以 `POST /run` 立即返回 job_id，由 `admin/jobrunner.py` 在守护线程里跑，
+前端 1.5s 轮询。**这是手动补跑的前置条件，只加按钮解决不了。**
+
+#### 互斥（三层，缺一不可）
+
+| 层 | 机制 | 防住什么 |
+| --- | --- | --- |
+| 1 | `RUNNER` 同 key 去重 | 两次手动补跑叠并发 |
+| 2 | `growth_tasks._RUN_LOCK`（非阻塞）| 任何原因的重入；抢不到即让路，**不排队** |
+| 3 | `scheduler._run_one` / `schedules.run_now` 查 `RUNNER.is_running()` | **手动 vs 定时**撞车 |
+
+第 3 层是必需的：jobrunner 同 key 只防得住「两次手动」。若不拦，
+定时任务与手动补跑会同时遍历同一批账号 —— 双倍打上游（风控面翻倍）并
+并发写回同一个 `auth_json`（后写覆盖先写，**丢掉对方的 token 刷新**）。
+定时侧跳过时记 `last_result={"skipped":"已有手动补跑在执行，本轮跳过"}`；
+手动触发定时任务则返回 **409**。
+
+> ⚠️ 手动补跑会**真实上报事件并领奖**（消耗该账号额度），不是演练。
+> 前端已加二次确认并显示将处理的账号数。
+
 ### 实测已知行为（SeeU 单号真实执行验证，2026-05）
 
 单号真实跑通一轮：接取 8 项 / 上报 18 次 / 领奖 6 项 / **入账 800 积分**。两个实测发现：
