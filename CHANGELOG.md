@@ -53,6 +53,20 @@
 
 ### 文档
 
+- **项目宣传海报 `docs/workbuddy2api-poster.png`**：新增一张 687×1024（2x 导出 1374×2048）
+  的竖版海报，用于项目介绍/分享。以火箭与发射塔为视觉主体：
+  - 火箭箭体承载 `WorkBuddy 2API` 标识与「登录态 → 标准 API 网关」一句话定位；
+  - 右侧光环标注三种兼容协议（`/v1/chat/completions`、`/v1/messages`、`/v1/responses`）
+    与能力项（工具调用、流式 SSE、故障转移）；
+  - 底部列技术栈（FastAPI / SQLAlchemy 2.0 / MySQL 8 / Redis 7 可选 / Python 3.10+）
+    与五项特性（开源开放、多协议、账号池、故障转移、配额限流）。
+  - 生成方式：用 HTML/CSS 手工排版后由 Chrome headless `--screenshot`（2x 缩放）
+    导出 PNG；排版源文件为一次性产物，未进版本库。
+- **项目宣传海报（含仓库地址）`docs/workbuddy2api-poster-v2.png`**：在第一张基础上补上
+  GitHub 仓库入口，方便直接分享：
+  - 品牌口号下方新增胶囊按钮「`github.com/weecliz/workbuddy2api`」（带 GitHub 图标）；
+  - 页脚右侧署名行同步换成同一仓库地址；
+  - 规格与第一张一致（687×1024，2x 导出 1374×2048）。
 - **`docs/TASKS.md` §五之二**：补「按账号汇总」与「单账号手动补跑」两节，
   含接口清单、互斥语义、以及为什么必须异步。
 - **成长任务全自动完成引擎（growth_tasks）**：把 workbuddy2api-hub 的国内版成长
@@ -148,6 +162,14 @@
 - **「Base URL 复制」按钮点了没反应**（`admin/static/index.html`）：`copyText()` 无条件调
   `i.select()`，但 Base URL 所在元素是 `<code>` 而非 `<input>` —— `<code>` 没有 `select()`，
   第一句就抛 `TypeError`，后面的剪贴板写入与 `toast("已复制")` 全执行不到。
+- **上游 4xx 错误在 Chat 流式路径被吞成裸文本**（`admin/routers/proxy.py` `/v1/chat/completions`）：
+  `emit_client_error` 历史实现直接 `return` 上游错误原始文本，混进 `text/event-stream`
+  后 OpenAI SDK 解析不出任何事件，客户端（Pi 等）只能看到一句
+  `Stream ended without finish_reason`，真实的上游 400 原因（如上下文超限）被完全吞掉。
+  已改为包成 `data: {"error": {...}}` 合法 SSE 事件——OpenAI SDK 收到带 `error` 字段的
+  事件会抛 `APIError` 并携带完整 body，客户端能看到真实错误。同时在 `_proxy_loop`
+  流式与非流式两处补了上游错误 body 的 WARNING 日志（此前 4xx 只有 httpx 状态码行，
+  body 无处可查，排查只能靠猜）。
   现在按目标类型取文本（`input.value` 或 `textContent`）并统一走回退路径；
   `navigator.clipboard` 只在安全上下文（https / **localhost**）存在，
   局域网 `http://ip:port` 访问时为 `undefined`，原实现的 `?.` 会静默跳过写入而仍提示"已复制"，

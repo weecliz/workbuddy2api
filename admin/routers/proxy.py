@@ -836,6 +836,8 @@ async def _proxy_loop(
                                             if isinstance(detail, bytes) else str(detail)[:500])
                                     kind = _classify_error(r.status_code, text)
                                     _apply_account_policy(db2, acc, kind, r.status_code, text)
+                                    _logger.warning("上游错误 acc=%s model=%s HTTP %s kind=%s body=%s",
+                                                    acc.uid, m, r.status_code, kind, text[:300])
                                     if kind not in _RETRYABLE_KINDS:
                                         piece = emit_client_error(r.status_code, text)
                                         if piece is not None:
@@ -854,6 +856,8 @@ async def _proxy_loop(
                                 text = r.text[:500]
                                 kind = _classify_error(r.status_code, text)
                                 _apply_account_policy(db2, acc, kind, r.status_code, text)
+                                _logger.warning("上游错误 acc=%s model=%s HTTP %s kind=%s body=%s",
+                                                acc.uid, m, r.status_code, kind, text[:300])
                                 if kind not in _RETRYABLE_KINDS:
                                     piece = emit_client_error(r.status_code, text)
                                     if piece is not None:
@@ -985,9 +989,14 @@ async def chat_completions(
                 yield chunk
         return consume
 
-    def emit_client_error(_status, text):
-        # 不可重试的客户端错误：原样透出上游错误文本（历史行为，保持兼容）
-        return text
+    def emit_client_error(status, text):
+        # 不可重试的客户端错误：包成合法 SSE 事件透出。
+        # 历史实现直接 return 裸文本，混进 text/event-stream 后 OpenAI SDK
+        # 解析不出任何事件，客户端只能看到 "Stream ended without finish_reason"，
+        # 真实的上游 400 原因（如上下文超限）被吞掉。SDK 收到 data: {..."error":...}
+        # 会抛 APIError 并携带完整 body（见 openai/core/streaming.js）。
+        _logger.warning("上游客户端错误 HTTP %s: %s", status, text[:300])
+        return f"data: {json.dumps({'error': {'message': text, 'type': 'upstream_error', 'code': status}}, ensure_ascii=False)}\n\n"
 
     def emit_exhausted(err_kind, has_err):
         msg = (f"所有账号/候选模型均不可用（最后错误：{err_kind}）"
