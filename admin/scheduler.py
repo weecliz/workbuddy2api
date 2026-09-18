@@ -17,6 +17,7 @@
   - activity_report：对话活跃上报（点亮连登 + 解锁领猫任务）
 """
 import json
+import random
 import threading
 import time
 from datetime import datetime, timedelta
@@ -39,8 +40,15 @@ def run_task(task: str, db, schedule: "Schedule | None" = None) -> dict:
         from admin.routers import accounts as acc_router
         from admin.models import Account
         ok = fail = 0
+        # 账号间随机延迟 2~5s：这是唯一高频任务（每小时）+ 之前零间隔，
+        # 13 个号 2 个请求连发是最机器化的风控形态。抖动打散等间距特征。
+        # 13 个号一轮多花 ≤1 分钟，每小时跑一次完全无感。
+        first = True
         # pi-lens-ignore: python-sql-injection
         for a in db.query(Account).filter(Account.status == "active").all():
+            if not first:
+                time.sleep(random.uniform(2.0, 5.0))
+            first = False
             if acc_router._refresh_balance(a):
                 ok += 1
             else:
@@ -88,25 +96,41 @@ def _run_one(s: Schedule, db, now: datetime):
 
 def _loop():
     while True:
-        # db 必须先置 None：SessionLocal() 自身可能抛异常（数据库不可用 / 驱动问题），
-        # 那样 db 就未绑定，而下面 except 里还要用它 —— 直接调会抛 NameError，
-        # 把真实错误盖掉（调度线程看似照常跑，实质问题没人知道）。
-        db = None
         try:
+            # 先只读地收由到期任务 id 列表（短事务，立刻释放连接），
+            # 执行阶段再逐任务开会话 —— 错峰 sleep 最长 150s，若在长 sleep
+            # 期间挂着同一连接，MySQL 会把空闲连接断掉，后续 _run_one 写库报错。
             db = SessionLocal()
-            now = datetime.utcnow()
-            # pi-lens-ignore: python-sql-injection
-            for s in db.query(Schedule).filter(Schedule.enabled == 1).all():
-                if s.next_run_at is None or s.next_run_at <= now:
-                    _run_one(s, db, now)
-        except Exception:
-            if db is not None:
+            try:
+                now = datetime.utcnow()
+                due_ids = [s.id for s in db.query(Schedule).filter(
+                    Schedule.enabled == 1).all()
+                    if s.next_run_at is None or s.next_run_at <= now]
+            finally:
+                db.close()
+
+            for i, sid in enumerate(due_ids):
+                if i:
+                    # 同一轮到期的多个任务错峰执行：播种 / 手动触发 / 相同 interval
+                    # 都会让几个任务同刻到期，背靠背执行意味着同一账号在几十秒内
+                    # 被 签到→旅行→上报→成长 连续打 4 轮，形态过于机器。
+                    # 不改 next_run_at（按次加随机偏移会逐日累积漂移），在执行层拉开。
+                    time.sleep(random.uniform(60, 150))
+                db = SessionLocal()
                 try:
+                    s = db.query(Schedule).filter(Schedule.id == sid).first()
+                    # 等待期间可能被删除 / 停用 / 手动触发过（next_run_at 已后移）
+                    if s is None or not s.enabled:
+                        continue
+                    if s.next_run_at is not None and s.next_run_at > datetime.utcnow():
+                        continue
+                    _run_one(s, db, datetime.utcnow())
+                finally:
                     db.close()
-                except Exception:
-                    pass
-        else:
-            db.close()
+        except Exception:
+            # SessionLocal() / 查询自身的异常（数据库不可用 / 驱动问题）就地吞掉：
+            # 调度线程不能死，下一轮 15s 后重试。任务级异常已在 _run_one 内隔离。
+            pass
         time.sleep(15)
 
 

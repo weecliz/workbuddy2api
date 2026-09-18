@@ -7,8 +7,18 @@
 最坏情况只是当天多试一次领养，代价可接受，换不来持久化复杂度。
 """
 from datetime import datetime, timedelta
+import random
 
 ACCOUNT_DELAY = 0.8        # 全量账号约 0.8s/个，避免上游风控
+
+
+def jitter_delay(min_s: float, max_s: float) -> float:
+    """在 [min_s, max_s) 区间均匀取一个秒数，给账号间限速加抖动。
+
+    固定间隔的批量请求在服务端日志里是等间距的机器形态；带随机抖动后
+    看起来更像分散的用户行为。取值区间由调用方给出。
+    """
+    return random.uniform(min_s, max_s)
 ADOPT_THRESHOLD_MARKER = "first_buddy task not completed yet"
 
 # uid → 上游自然日（CST）。同日不再重试领养，避免对上游重试轰炸。

@@ -2,10 +2,15 @@
 
 风控要点：
   - 全部请求经 CredentialManager 注入 X-Device-Token（与桌面端一致）。
+  - 账号间随机延迟 2~5s（对齐 refresh_balances 的口径）：查状态 + 领取是
+    连续两个请求，零间隔连发是最机器化的形态，抖动打散等间距特征。
+    每天只跑一轮，13 个号多花 ≤1 分钟无感。
   - 若任务配置了 stop_after（下次停止领取时间），到达后直接跳过，不再发领取请求，
     避免活动下线后继续请求触发上游风控。
   - 若某账号领取返回 EventEnded(1003)，自动把 stop_after 设为今天，后续不再尝试。
 """
+import random
+import time
 from datetime import datetime
 
 from admin.backend import AccountSession
@@ -24,7 +29,11 @@ def run_daily_checkin(db, schedule=None) -> dict:
     claimed = skipped_already = failed = 0
     ended = False
     errors: list[str] = []
+    first = True
     for a in db.query(Account).filter(Account.status == "active").all():
+        if not first:
+            time.sleep(random.uniform(2.0, 5.0))
+        first = False
         try:
             with AccountSession(a.auth_json) as sess:
                 st = sess.get_checkin_status()
