@@ -261,6 +261,10 @@
 - **「Base URL 复制」按钮点了没反应**（`admin/static/index.html`）：`copyText()` 无条件调
   `i.select()`，但 Base URL 所在元素是 `<code>` 而非 `<input>` —— `<code>` 没有 `select()`，
   第一句就抛 `TypeError`，后面的剪贴板写入与 `toast("已复制")` 全执行不到。
+  现在按目标类型取文本（`input.value` 或 `textContent`）并统一走回退路径；
+  `navigator.clipboard` 只在安全上下文（https / **localhost**）存在，
+  局域网 `http://ip:port` 访问时为 `undefined`，原实现的 `?.` 会静默跳过写入而仍提示"已复制"，
+  造成“看起来成功了其实没复制”——现在会回退到 `execCommand`，失败则明确报错。
 - **上游 4xx 错误在 Chat 流式路径被吞成裸文本**（`admin/routers/proxy.py` `/v1/chat/completions`）：
   `emit_client_error` 历史实现直接 `return` 上游错误原始文本，混进 `text/event-stream`
   后 OpenAI SDK 解析不出任何事件，客户端（Pi 等）只能看到一句
@@ -269,10 +273,6 @@
   事件会抛 `APIError` 并携带完整 body，客户端能看到真实错误。同时在 `_proxy_loop`
   流式与非流式两处补了上游错误 body 的 WARNING 日志（此前 4xx 只有 httpx 状态码行，
   body 无处可查，排查只能靠猜）。
-  现在按目标类型取文本（`input.value` 或 `textContent`）并统一走回退路径；
-  `navigator.clipboard` 只在安全上下文（https / **localhost**）存在，
-  局域网 `http://ip:port` 访问时为 `undefined`，原实现的 `?.` 会静默跳过写入而仍提示"已复制"，
-  造成“看起来成功了其实没复制”——现在会回退到 `execCommand`，失败则明确报错。
 - **用量统计「今天」在凌晨会错成昨天**：`_usDateStr()` 原用 `toISOString()`（转 UTC），
   东八区下凌晨 0:00~8:00 会算出前一天。改为按本地时区逐字段拼接。
 - **`inject` 改为原子写**（`admin/routers/accounts.py`）：原先用
