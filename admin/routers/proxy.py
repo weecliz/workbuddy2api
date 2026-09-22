@@ -73,15 +73,15 @@ except Exception:  # pragma: no cover - 降级分支
     _DESENSITIZE_AVAILABLE = False
     desensitize_body = None
 
-# DeepSeek 推理处理：档位兜底 + reasoning_content 回填。
+# 出站前修复：工具配对自愈（所有模型）+ DeepSeek 推理处理。
 # 缺依赖时降级为恒等函数（不影响主流程）。
 try:
-    from core.converter import inject_deepseek_reasoning
+    from core.converter import prepare_outbound_body
     _REASONING_FIX_AVAILABLE = True
 except Exception:  # pragma: no cover - 降级分支
     _REASONING_FIX_AVAILABLE = False
 
-    def inject_deepseek_reasoning(body, default_effort="high"):
+    def prepare_outbound_body(body, default_effort="high"):
         # 降级时也要清掉 Anthropic 侧的临时意图键，否则它会随 body 发往上游。
         body.pop("__thinking_intent", None)
         return body
@@ -845,13 +845,15 @@ async def _proxy_loop(
             for m in order:
                 body = dict(chat_body)
                 body["model"] = m
-                # DeepSeek 推理处理：缺档时补 high + 给 assistant 消息回填
-                # reasoning_content。放在这里（而非各端点）是因为这是**所有**
-                # 端点（/v1/chat/completions、/v1/responses、/v1/messages）
+                # 出站前修复（见 core/converter.prepare_outbound_body）：
+                #   ① 工具调用配对自愈（所有模型）
+                #   ② DeepSeek 推理处理（档位兜底 + reasoning_content 回填）
+                # 放在这里（而非各端点）是因为这是**所有**端点
+                # （/v1/chat/completions、/v1/responses、/v1/messages）
                 # 每次尝试都必经的出站构造点，一处覆盖全部；
                 # 且此时脱敏已完成，不会被脱敏再改动 body。
                 if _REASONING_FIX_AVAILABLE:
-                    body = inject_deepseek_reasoning(body)
+                    body = prepare_outbound_body(body)
                 tried_ids: set = set()
                 for _ in range(3):
                     acc = _select_account(db2, exclude_ids=tried_ids, min_balance=1)

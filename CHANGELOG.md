@@ -162,6 +162,27 @@
 
 ### 修复
 
+- **工具调用配对不自愈，一次失败调用即让整条会话报废**（`core/converter.py`）：
+  上游要求 `role:"tool"` 的结果消息**紧跟**请求它的 assistant 消息，中间不能有
+  其他消息，否则整条请求被拒：`400 code 11148 "tool calls and tool results do not
+  match, please start a new conversation and retry"` —— 注意措辞是「请开新会话」，
+  意味着该对话已救不回来。两类成因：
+  - **孤儿调用**：工具执行失败（参数错 / 超时 / 工具不存在）时，客户端把
+    `assistant.tool_calls` 写进了历史，却永远不写回结果消息；该坏历史随后
+    每一轮都被原样重放，上游对之后每条消息都返 11148。
+  - **配对被打断**：并行调用时中间插入了别的消息（如 Codex 的
+    `image_resize_notice` 作为 developer 消息落在两个结果之间）。
+
+  新增两个纯函数与一个总入口（口径对齐参考实现 hub `wb_proxy.py:1942/2011`）：
+  - `repack_tool_result_blocks()`：把结果块移回所属批次之后（**只重排、不删**，
+    结果与相对顺序不变，干扰消息移到批次之后）。
+  - `cleanup_orphan_tool_calls()`：用**同一份 id 交集**（`call_ids & result_ids`）
+    对称裁剪两侧——既删「有调用无结果」的调用，也删「有结果无调用」的结果，
+    因此不可能留下半截配对。
+  - `prepare_outbound_body()`：出站前修复的总入口，先做配对自愈（**所有模型**），
+    再做 DeepSeek 推理处理（仅 DeepSeek）。这一改动使接入点仍保持 4 处而非 8 处。
+
+  两个函数都有 `changed` 标志，未做修改时返回原对象，**正常历史行为不变**。
 - **`thinking` 未进 `/gw` 透传白名单，导致客户端意图被反向执行**
   （`core/converter.py` 的 `PASSTHROUGH_BODY_KEYS`）：
   - 客户端在 `/gw/*` 路径发 `thinking:{type:"disabled"}` 时，该字段被白名单丢掉，

@@ -126,6 +126,22 @@ def resolve_thinking_state(body: dict, model) -> bool:
     return True
 
 
+def prepare_outbound_body(body: dict, default_effort: str = "high") -> dict:
+    """出站前修复的总入口（原地修改并返回）。
+
+    集中两件对所有模型都该做的事：
+      1. 工具调用配对自愈（repair_tool_pairing）——不限模型，任何模型都可能
+         因为客户端的坏历史而被上游 11148 拒掉。
+      2. DeepSeek 推理处理（档位兜底 + reasoning_content 回填）——仅 DeepSeek。
+
+    放在同一个入口里，是为了让接入点保持 4 处（不是 8 处），
+    以后再加出站前修复也只改这里。
+    """
+    repair_tool_pairing(body)
+    inject_deepseek_reasoning(body, default_effort)
+    return body
+
+
 def inject_deepseek_reasoning(body: dict, default_effort: str = "high") -> dict:
     """出站前的 DeepSeek 推理处理：档位兜底 + reasoning_content 回填（原地修改并返回）。
 
@@ -177,6 +193,172 @@ def inject_deepseek_reasoning(body: dict, default_effort: str = "high") -> dict:
     if isinstance(messages, list) and messages:
         body["messages"] = backfill_reasoning_content(
             messages, model, thinking_enabled=resolve_thinking_state(body, model))
+    return body
+
+
+# ---------------------------------------------------------------------------
+# 工具调用配对自愈
+#
+# 上游要求 role:"tool" 的结果消息必须**紧跟**请求它的 assistant 消息，中间不能有
+# 其他消息；否则整条请求被拒：
+#     400 code 11148 "tool calls and tool results do not match,
+#                      please start a new conversation and retry"
+# 注意上游的措辞是「请开新会话」——意味着该对话已救不回来。
+#
+# 两种坏历史的成因：
+#   A. 孤儿调用：工具执行失败（参数错 / 超时 / 工具不存在）时，客户端把
+#      assistant.tool_calls 写进了历史，却永远不写回结果消息。该坏历史随后
+#      每一轮都被原样重放 → 上游对之后每条消息都返 11148。
+#      即「一次失败调用即可让整条会话报废」。
+#   B. 配对被打断：并行调用时中间插入了别的消息（如 Codex 的
+#      image_resize_notice 作为 developer 消息落在两个结果之间）。
+#
+# 两个函数都是**纯函数**（无网络、无依赖），且都有 changed 标志：
+# 未做任何修改时返回原对象，正常历史行为不变。
+# ---------------------------------------------------------------------------
+
+
+def repack_tool_result_blocks(messages: list):
+    """把 tool 结果块移回它所属的 assistant.tool_calls 批次之后（只重排，不删）。
+
+    结果与相对顺序都不变，只是把插进来的干扰消息移到批次之后：
+
+        修复前: assistant(calls) → tool(1) → developer(notice) → tool(2)
+        修复后: assistant(calls) → tool(1) → tool(2) → developer(notice)
+
+    返回 (messages, changed)。
+    """
+    if not isinstance(messages, list) or len(messages) < 3:
+        return messages, False
+    out = []
+    changed = False
+    i = 0
+    while i < len(messages):
+        m = messages[i]
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            out.append(m)
+            i += 1
+            continue
+        calls = m.get("tool_calls")
+        if not isinstance(calls, list) or not calls:
+            out.append(m)
+            i += 1
+            continue
+        want = set()
+        for tc in calls:
+            if isinstance(tc, dict):
+                tid = tc.get("id")
+                if isinstance(tid, str) and tid:
+                    want.add(tid)
+        out.append(m)
+        i += 1
+        results = []
+        between = []
+        saw_non_tool = False
+        while i < len(messages):
+            mm = messages[i]
+            if not isinstance(mm, dict):
+                break
+            role = mm.get("role")
+            if role == "tool":
+                tid = mm.get("tool_call_id")
+                if not (isinstance(tid, str) and tid in want):
+                    break
+                results.append(mm)
+                if saw_non_tool:
+                    changed = True
+                i += 1
+                continue
+            if not results:
+                break
+            # 下一个 assistant.tool_calls 开启新批次：必须交回外层循环，
+            # 否则它自己的结果永远轮不到重排。
+            if role == "assistant" and isinstance(mm.get("tool_calls"), list) \
+                    and mm["tool_calls"]:
+                break
+            between.append(mm)
+            saw_non_tool = True
+            i += 1
+        out.extend(results)
+        out.extend(between)
+    if not changed:
+        return messages, False
+    return out, True
+
+
+def cleanup_orphan_tool_calls(messages: list):
+    """对称裁剪孤儿：既删「有调用无结果」的调用，也删「有结果无调用」的结果。
+
+    两侧用**同一份 id 交集**（``keep = call_ids & result_ids``）裁剪，
+    因此不可能留下半截配对。
+
+    返回 (messages, changed)。
+    """
+    if not isinstance(messages, list) or not messages:
+        return messages, False
+    call_ids = set()
+    result_ids = set()
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        if role == "tool":
+            tid = m.get("tool_call_id")
+            if isinstance(tid, str) and tid:
+                result_ids.add(tid)
+        elif role == "assistant":
+            calls = m.get("tool_calls")
+            if isinstance(calls, list):
+                for tc in calls:
+                    if isinstance(tc, dict):
+                        tid = tc.get("id")
+                        if isinstance(tid, str) and tid:
+                            call_ids.add(tid)
+    if not call_ids and not result_ids:
+        return messages, False
+    keep = call_ids & result_ids
+    changed = False
+    for m in messages:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        calls = m.get("tool_calls")
+        if not isinstance(calls, list) or not calls:
+            continue
+        kept = [tc for tc in calls
+                if isinstance(tc, dict) and isinstance(tc.get("id"), str)
+                and tc["id"] in keep]
+        if len(kept) == len(calls):
+            continue
+        changed = True
+        if kept:
+            m["tool_calls"] = kept
+        else:
+            m.pop("tool_calls", None)
+    out = []
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "tool":
+            tid = m.get("tool_call_id")
+            if not (isinstance(tid, str) and tid in keep):
+                changed = True
+                continue
+        out.append(m)
+    if not changed:
+        return messages, False
+    return out, True
+
+
+def repair_tool_pairing(body: dict) -> dict:
+    """出站前的工具配对自愈：先重排批次，再对称裁剪孤儿（原地修改并返回）。
+
+    顺序不能颠倒：先重排能把「被干扰消息打断」的合法配对恢复，
+    这样孤儿裁剪面对的就是真实缺失（而非只是顺序错乱），避免误删。
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return body
+    repaired, _ = repack_tool_result_blocks(messages)
+    repaired, _ = cleanup_orphan_tool_calls(repaired)
+    body["messages"] = repaired
     return body
 
 
@@ -847,7 +1029,7 @@ async def chat_completions(request: Request,
 
     # DeepSeek 推理处理（档位兜底 + reasoning_content 回填）。放在脱敏之后：
     # 脱敏会重写消息内容，先脱敏再回填才能保证最终出站的 body 已补齐。
-    body = inject_deepseek_reasoning(body)
+    body = prepare_outbound_body(body)
 
     # 日志：请求摘要
     model_name = payload.get("model", "auto")
@@ -1183,7 +1365,7 @@ async def create_response(request: Request,
 
     chat_body = _chat_body_desensitize(chat_body)
     # DeepSeek 推理处理（同 chat_completions：脱敏之后再回填）
-    chat_body = inject_deepseek_reasoning(chat_body)
+    chat_body = prepare_outbound_body(chat_body)
 
     client_wants_stream = payload.get("stream", True)  # Codex CLI 默认 stream
     model_name = payload.get("model", "auto")
@@ -1319,7 +1501,7 @@ async def create_message(request: Request,
                                      strip_tool_metadata=True)
 
     # DeepSeek 推理处理（同 chat_completions：脱敏之后再回填）
-    chat_body = inject_deepseek_reasoning(chat_body)
+    chat_body = prepare_outbound_body(chat_body)
 
     model_name = payload.get("model", "auto")
     chat_messages = chat_body.get("messages", [])
