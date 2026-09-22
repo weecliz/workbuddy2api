@@ -595,6 +595,23 @@ def _candidate_models(db: Session, tried: set) -> list:
     return list(free) + list(paid)
 
 
+def _take_nonzero(cur, new):
+    """非零优先的字段吸纳：新值为 None 或「零而旧值已有正数」时保留旧值。
+
+    背景（参考实现 hub v1.4.5 实测）：上游在流式中间帧会携带全 0 的 usage 占位，
+    无条件覆盖会把已经拿到的真实值抹掉 —— 表现为 GPT 系列模型的最终 Token 变成 0、
+    生成速度缺失。
+    """
+    if new is None:
+        return cur
+    if cur is None:
+        return new
+    if (isinstance(new, (int, float)) and new == 0
+            and isinstance(cur, (int, float)) and cur > 0):
+        return cur          # 旧值已是正数、新值是 0 → 视为占位帧，保留旧值
+    return new
+
+
 def _parse_usage(sse_text: str) -> dict:
     """从 chat SSE 文本里找最后一个带 usage 的事件，解析 credits 与 token 明细。
 
@@ -638,12 +655,11 @@ def _parse_usage(sse_text: str) -> dict:
                 except ValueError:
                     pass
             _logger.debug("parse_usage credit raw=%r parsed=%s", cred, credits)
-        if usage.get("prompt_tokens") is not None:
-            prompt_tokens = usage["prompt_tokens"]
-        if usage.get("completion_tokens") is not None:
-            completion_tokens = usage["completion_tokens"]
-        if usage.get("total_tokens") is not None:
-            total_tokens = usage["total_tokens"]
+        # 非零优先吸纳（见 _take_nonzero 的说明）：上游流式中间帧可能携带全 0
+        # 的 usage 占位，无条件覆盖会把已拿到的真实值抹掉。
+        prompt_tokens = _take_nonzero(prompt_tokens, usage.get("prompt_tokens"))
+        completion_tokens = _take_nonzero(completion_tokens, usage.get("completion_tokens"))
+        total_tokens = _take_nonzero(total_tokens, usage.get("total_tokens"))
         # 缓存命中 token：OpenAI 标准在 prompt_tokens_details.cached_tokens
         cached = None
         ptd = usage.get("prompt_tokens_details")
@@ -652,7 +668,7 @@ def _parse_usage(sse_text: str) -> dict:
         if cached is None and usage.get("cached_tokens") is not None:
             cached = usage["cached_tokens"]
         if cached is not None:
-            cached_tokens = cached
+            cached_tokens = _take_nonzero(cached_tokens, cached)
     return {
         "credits": credits,
         "prompt_tokens": prompt_tokens,

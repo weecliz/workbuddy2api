@@ -158,12 +158,20 @@ def inject_deepseek_reasoning(body: dict, default_effort: str = "high") -> dict:
     opted_out = isinstance(thinking, dict) and \
         str(thinking.get("type") or "").strip().lower() == "disabled"
     effort = body.get("reasoning_effort") or body.get("reasoningEffort")
+    # 档位也可能写在 thinking.effort 里（Anthropic 风格，也常见于 OpenAI 兼容
+    # 客户端）——只看顶层字段会漏判，后续兜底就会把客户端显式要的 low 盖成 high。
+    if not effort and isinstance(thinking, dict):
+        inner = thinking.get("effort")
+        if isinstance(inner, str) and inner.strip():
+            effort = inner.strip()
 
     if not opted_out and str(effort or "").strip().lower() != "none":
         if "thinking" not in body:
             body["thinking"] = {"type": "enabled"}
-        if not effort:
-            body["reasoning_effort"] = default_effort
+        # 档位优先级：顶层 reasoning_effort > thinking.effort > 默认 high。
+        # 后两者都要写回 body：thinking.effort 只是局部变量，不写回的话
+        # 出站时仍只会看到顶层的 high（客户端显式要的 low 就白说了）。
+        body["reasoning_effort"] = effort or default_effort
 
     messages = body.get("messages")
     if isinstance(messages, list) and messages:
@@ -646,6 +654,12 @@ PASSTHROUGH_BODY_KEYS = {
     "stream_options", "stop", "presence_penalty", "frequency_penalty",
     "n", "response_format", "seed", "user", "reasoning_effort",
     "verbosity", "reasoning_summary",
+    # thinking 必须透传：它是客户端表达「要不要思考」的开关。
+    # 缺失时的后果（实测）：客户端发 thinking:{type:"disabled"}，该字段在
+    # /gw 路径被白名单丢掉，后续的 DeepSeek 档位兜底看不到「已显式关闭」，
+    # 反而补上 thinking=enabled + reasoning_effort=high —— 客户端要求不思考，
+    # 却被强制开启思考。透传后兜底逻辑才能正确识别 disabled 并放行。
+    "thinking",
 }
 
 # ---------------------------------------------------------------------------

@@ -162,6 +162,23 @@
 
 ### 修复
 
+- **`thinking` 未进 `/gw` 透传白名单，导致客户端意图被反向执行**
+  （`core/converter.py` 的 `PASSTHROUGH_BODY_KEYS`）：
+  - 客户端在 `/gw/*` 路径发 `thinking:{type:"disabled"}` 时，该字段被白名单丢掉，
+    后续的 DeepSeek 档位兜底看不到「已显式关闭」，反手补上 `thinking=enabled` +
+    `reasoning_effort=high` —— **客户端要求不思考，却被强制开启思考**。
+  - 该缺陷在引入档位兜底后才具备危害（在那之前 `thinking` 直接被丢弃，
+    不会产生反向结果），本次一并修正：白名单接纳 `thinking`。
+  - 同时修正档位优先级：`thinking.effort` 先前只被读进局部变量、未写回 body，
+    导致客户端显式指定的 `low` 仍被默认 `high` 覆盖。
+    现为「顶层 `reasoning_effort` > `thinking.effort` > 默认 `high`」。
+- **流式中间帧的全 0 usage 占位会抹掉真实用量**（`admin/routers/proxy.py`）：
+  `_parse_usage()` 原先对每个带 usage 的事件**无条件覆盖**，若真值帧之后再来一个
+  「字段更全但数值为 0」的占位帧，已拿到的真实 Token 就被抹成 0。
+  参考实现 hub v1.4.5 实测过同一问题（GPT 系列模型的最终 Token 变成 0、生成速度缺失）。
+  新增 `_take_nonzero()` 做非零优先吸纳：新值为 `None` 或「零而旧值已有正数」时保留旧值；
+  `prompt_tokens` / `completion_tokens` / `total_tokens` / `cached_tokens` 四个字段
+  各自独立判定（不互相影响）。
 - **Anthropic 请求的 `thinking` 被直接丢弃，Claude Code 思维链一直为空**
   （`core/anthropic_adapter.py` + `core/converter.py`）：原实现的 docstring 写着
   「`metadata` / `thinking` → 丢弃」，客户端显式请求思考时后端仍按「不思考」应答。
