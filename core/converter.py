@@ -52,6 +52,198 @@ def _is_deepseek(model) -> bool:
     return bool(model) and str(model).lower().startswith("deepseek")
 
 
+# ---------------------------------------------------------------------------
+# 思考开关（客户端意图 → 上游认得的形态）
+#
+# 上游**只认扁平的 reasoning_effort**，且对「关闭」的写法有反直觉的实测行为：
+#     reasoning_effort="off"              → 400 code=11150
+#     reasoning_effort="none"/"minimal"   → **反而开启思维链**
+# 因此这些值绝不能原样透传，必须翻译成上游认得的 thinking.disabled。
+# 口径对齐直接上游 xiaofan6ya/workbuddy2api 的 upstream_compat.py。
+# ---------------------------------------------------------------------------
+
+# 「关闭」意图的各种写法
+THINKING_OFF_SPELLINGS = frozenset({"off", "none", "disabled", "false", "0"})
+
+# 表达思考开关的字段名（含三方客户端的异名：enable_thinking / enableThinking）
+_THINKING_KEYS = ("thinking", "enable_thinking", "enableThinking")
+
+
+# 每模型支持的推理档位与默认档。
+# 为什么需要：兜底注入的档位若不在该模型支持列表内，可能被上游拒或静默忽略，
+# 兜底本身失效。参考实现声明 deepseek-v4.1-flash 支持 [low, high, max]、默认 high。
+# 未声明的模型走 _FALLBACK_EFFORTS（deepseek 系的通用档位）。
+DEEPSEEK_EFFORTS: dict[str, dict] = {
+    "deepseek-v4.1-flash": {"efforts": ("low", "high", "max"), "default": "high"},
+}
+_FALLBACK_EFFORTS = {"efforts": ("low", "high", "max"), "default": "high"}
+
+
+# 已被翻译过的异名字段（翻译后应当清掉，避免干扰上游）
+_THINKING_ALIAS_KEYS = ("enable_thinking", "enableThinking")
+
+
+def _strip_thinking_aliases(body: dict) -> None:
+    """清掉已被翻译过的异名字段（保留 thinking 本身与 Responses 的 reasoning*）。"""
+    for key in _THINKING_ALIAS_KEYS:
+        body.pop(key, None)
+
+
+def _clear_thinking_fields(body: dict) -> None:
+    """关闭意图：清掉**一切**可能导致上游开启思考的字段。
+
+    只「跳过注入」不够：客户端发来的 reasoning_effort="none" 若原样留着，
+    上游会**反而开启**思维链；"off" 则直接 400。必须显式清掉。
+    """
+    for key in (("reasoning_effort", "reasoningEffort", "reasoning",
+                 "include_reasoning", "reasoning_summary")
+                + _THINKING_ALIAS_KEYS):
+        body.pop(key, None)
+
+
+def _deepseek_thinking_default_on() -> bool:
+    """客户端**没表态**时，是否默认替 deepseek 开启思考。
+
+    两家上游的选择相反，本项目把它做成开关：
+      - 直接上游 xiaofan6ya：**绝不替客户端开启**（upstream_compat 的注释明确写
+        「没传思考字段的请求保持不开启，与此前行为一致」）
+      - hub：deepseek 思维链**默认开启**
+    本项默认 1（沿用 hub 口径）。若希望「只在客户端明确表态时才思考」
+    （可避免静默产生思考 token 的额外积分消耗），设 ADMIN_DEEPSEEK_THINKING_DEFAULT=0。
+    """
+    raw = os.environ.get("ADMIN_DEEPSEEK_THINKING_DEFAULT", "1")
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def deepseek_default_effort(model) -> str:
+    """该模型应使用的默认推理档；未声明则回退通用默认。"""
+    spec = DEEPSEEK_EFFORTS.get(str(model or "").strip().lower(), _FALLBACK_EFFORTS)
+    return str(spec.get("default") or "high")
+
+
+# 档位的强度顺序（用于把客户端给的档位映射到模型**支持**的档位上）
+_EFFORT_ORDER = ("minimal", "low", "medium", "high", "xhigh", "max")
+
+
+def _effort_rank(e: str) -> int:
+    """档位的强度序号；不认识的档位返回 -1。"""
+    try:
+        return _EFFORT_ORDER.index(str(e or "").strip().lower())
+    except ValueError:
+        return -1
+
+
+def normalize_effort(requested: str, model) -> str:
+    """把客户端给的档位映射到该模型**支持**的档位上。
+
+    为什么需要：兜底/透传一个该模型不支持的档位，可能被上游拒或静默忽略，
+    最终表现为「客户端调了档位但没生效」。
+
+    规则（对齐直接上游 xiaofan6ya 的 normalize_reasoning_effort）：
+      - 已在支持列表内 → 原样
+      - 不支持 → 取「不高于请求档位的最高支持档」
+      - 支持档全部高于请求档 → 取最低支持档（偏离最小）
+      - 模型未声明支持列表 / 档位不认识 → 按声明默认值，不做猜测性降级
+    """
+    spec = DEEPSEEK_EFFORTS.get(str(model or "").strip().lower())
+    if not spec:
+        return requested
+    supported = [str(e).strip().lower() for e in (spec.get("efforts") or ()) if str(e).strip()]
+    if not supported:
+        return requested
+    req = str(requested or "").strip().lower()
+    if req in supported:
+        return req
+    rr = _effort_rank(req)
+    if rr < 0:
+        return str(spec.get("default") or supported[-1])
+    not_higher = [e for e in supported if 0 <= _effort_rank(e) <= rr]
+    if not_higher:
+        return max(not_higher, key=_effort_rank)
+    return min(supported, key=_effort_rank)
+
+
+def wants_thinking(body: dict):
+    """客户端是否**明确表态**要不要思考。
+
+    True  = 明确要思考
+    False = 明确不要思考
+    None  = **没表态**（未出现任何思考相关字段）
+
+    「没表态」必须与「表态开启」严格区分：调用方据此决定是否翻译，
+    而不是据此补默认值 —— 否则静默请求的行为会被悄悄改变。
+    """
+    if not isinstance(body, dict):
+        return None
+
+    # 1) 扁平档位："high" → True；"off"/"none" 等 → False
+    for key in ("reasoning_effort", "reasoningEffort"):
+        v = body.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip().lower() not in THINKING_OFF_SPELLINGS
+
+    # 2) thinking / enable_thinking / enableThinking：bool / 字符串 / 对象三种形态
+    for key in _THINKING_KEYS:
+        v = body.get(key)
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s:
+                return s not in THINKING_OFF_SPELLINGS
+        if isinstance(v, dict):
+            t = str(v.get("type") or "").strip().lower()
+            if t:
+                return t not in THINKING_OFF_SPELLINGS
+            # 只有 budget_tokens / effort、没有 type：视为要思考
+            if v.get("budget_tokens") or v.get("effort"):
+                return True
+
+    # 3) Responses 嵌套形态 reasoning:{...} 与 include_reasoning
+    for key in ("reasoning", "include_reasoning"):
+        v = body.get(key)
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s:
+                return s not in THINKING_OFF_SPELLINGS
+        if isinstance(v, dict):
+            effort = str(v.get("effort") or "").strip()
+            if effort:
+                return effort.lower() not in THINKING_OFF_SPELLINGS
+            # {"summary":"auto"} 之类的非思考开关，不算表态
+    return None
+
+
+def _explicit_effort(body: dict) -> str:
+    """取客户端显式给出的档位（扁平字段优先，其次 thinking.effort / reasoning.effort）。
+
+    关闭写法（off/none/…）一律视为「没有给档位」，返回空串。
+    """
+    for key in ("reasoning_effort", "reasoningEffort"):
+        v = body.get(key)
+        if isinstance(v, str) and v.strip():
+            s = v.strip()
+            return "" if s.lower() in THINKING_OFF_SPELLINGS else s
+    for key in _THINKING_KEYS:
+        v = body.get(key)
+        if isinstance(v, dict):
+            e = v.get("effort")
+            if isinstance(e, str) and e.strip():
+                s = e.strip()
+                if s.lower() not in THINKING_OFF_SPELLINGS:
+                    return s
+    v = body.get("reasoning")
+    if isinstance(v, dict):
+        e = v.get("effort")
+        if isinstance(e, str) and e.strip():
+            s = e.strip()
+            if s.lower() not in THINKING_OFF_SPELLINGS:
+                return s
+    return ""
+
+
 def backfill_reasoning_content(messages: list, model, thinking_enabled=None) -> list:
     """给 assistant 消息补齐 reasoning_content（仅 DeepSeek）。
 
@@ -107,87 +299,88 @@ def backfill_reasoning_content(messages: list, model, thinking_enabled=None) -> 
 
 
 def resolve_thinking_state(body: dict, model) -> bool:
-    """判断本次请求是否处于「思考开启」状态（仅 DeepSeek）。
+    """本次请求最终是否处于「思考开启」状态（仅 DeepSeek）。
 
-    退出条件（任一命中即视为不思考）：
-      - `thinking.type == "disabled"`
-      - `reasoning_effort` / `reasoningEffort` 为 "none"
-    默认视为开启 —— 这与官方“不显式关就思考”的行为一致。
+    以客户端表态为准；没表态时由 _deepseek_thinking_default_on() 决定。
     """
     if not _is_deepseek(model):
         return False
-    thinking = body.get("thinking")
-    if isinstance(thinking, dict):
-        if str(thinking.get("type") or "").strip().lower() == "disabled":
-            return False
-    effort = body.get("reasoning_effort") or body.get("reasoningEffort")
-    if str(effort or "").strip().lower() == "none":
-        return False
-    return True
+    state = wants_thinking(body)
+    if state is None:
+        return _deepseek_thinking_default_on()
+    return state
 
 
-def prepare_outbound_body(body: dict, default_effort: str = "high") -> dict:
+def prepare_outbound_body(body: dict, default_effort: str | None = None) -> dict:
     """出站前修复的总入口（原地修改并返回）。
 
     集中两件对所有模型都该做的事：
       1. 工具调用配对自愈（repair_tool_pairing）——不限模型，任何模型都可能
          因为客户端的坏历史而被上游 11148 拒掉。
-      2. DeepSeek 推理处理（档位兜底 + reasoning_content 回填）——仅 DeepSeek。
+      2. DeepSeek 推理处理（翻译意图 + 档位兜底 + reasoning_content 回填）——仅 DeepSeek。
 
     放在同一个入口里，是为了让接入点保持 4 处（不是 8 处），
     以后再加出站前修复也只改这里。
+
+    default_effort 为 None 时由 core.converter.deepseek_default_effort(model)
+    按模型声明的档位决定 —— 不要在这里硬编码 "high"，否则档位表形同虚设。
     """
     repair_tool_pairing(body)
     inject_deepseek_reasoning(body, default_effort)
     return body
 
 
-def inject_deepseek_reasoning(body: dict, default_effort: str = "high") -> dict:
-    """出站前的 DeepSeek 推理处理：档位兜底 + reasoning_content 回填（原地修改并返回）。
+def inject_deepseek_reasoning(body: dict, default_effort: str | None = None) -> dict:
+    """出站前的推理处理：翻译思考意图（**模型无关**）+ DeepSeek 档位注入与回填。
 
-    为什么需要档位兜底（hub 实测，deepseek-v4.1-flash、同一 prompt）：
-        enabled + 无档位  -> reasoning_tokens 0,   reasoning_content len 0
-        reasoning_effort=high -> reasoning_tokens 37, reasoning_content len 117
-    即：只开 thinking 而不带档位，上游仍按“不思考”应答，思维链被静默丢弃。
-
-    原则（与 hub 一致）：
-      - 客户端显式指定的档位**永不覆盖**
-      - `thinking.type=disabled` / `effort=none` 照常退出，不被迫思考
-      - 只对 DeepSeek 系生效
+    分为两层：
+      **模型无关层**：客户端明确表达「关闭」时，把 off/none/disabled 这类
+        **非法档位值**从 reasoning_effort 上摘掉。它们不是合法档位：
+        实测 deepseek-v4.1-flash 收到 off → 400 code=11150；
+        glm-5.3 / glm-5.3-flash 则 **静默忽略** —— 两种都不是客户端要的。
+      **DeepSeek 层**（模型名以 deepseek 开头）：
+        1. 明确开启 → 异名/嵌套写法统一落地成扁平 reasoning_effort，并按模型档位表归一
+        2. 明确关闭 → 写 thinking={"type":"disabled"}
+        3. 没表态 → 由 ADMIN_DEEPSEEK_THINKING_DEFAULT 决定是否默认开启
+        4. reasoning_content 回填（上游要求每条 assistant 消息都带）
     """
     model = body.get("model")
+
+    # Anthropic 遗留意图先落地（非 DeepSeek 时它自己会丢弃；内部会 pop 临时键）
+    apply_thinking_intent(body, model)
+
+    # 取客户端意图 —— 必须在清理字段**之前**取，否则清完就丢了
+    state = wants_thinking(body)
+    opted_out = (state is not None) and (not state)
+
+    # ---- 模型无关层：关闭意图一律摘掉非法档位值 ----
+    if opted_out:
+        _clear_thinking_fields(body)
+
     if not _is_deepseek(model):
-        # 非 DeepSeek：不注入任何推理参数，但要把 Anthropic 侧的临时意图键清掉。
-        # 否则它会随 body 一起发往上游（无效字段，无价值且可能引起校验问题）。
+        # 非 DeepSeek：不注入档位/thinking（无证据表明这些模型认这两个字段），
+        # 但上面的清理仍生效 —— 避免把 off 这类值送到会校验的模型上。
         if THINKING_INTENT_KEY in body:
             body.pop(THINKING_INTENT_KEY, None)
         return body
 
-    # 先把 Anthropic 遗留的思考意图落实成后端参数（非 DeepSeek 时丢弃）。
-    # 必须在模型已知之后做：_map_anthropic_model 会把 claude-sonnet-4 之类
-    # 映射到本号池的真实模型，映射前就写 effort 会误带到非 DeepSeek 模型上。
-    # 也必须在下面「档位兜底」之前做 —— 否则兜底先写入 high，
-    # 客户端在 thinking.effort 里指定的 low 就会被 setdefault 挡掉。
-    apply_thinking_intent(body, model)
+    # ---- DeepSeek 层 ----
+    fallback = default_effort or deepseek_default_effort(model)
 
-    thinking = body.get("thinking")
-    opted_out = isinstance(thinking, dict) and \
-        str(thinking.get("type") or "").strip().lower() == "disabled"
-    effort = body.get("reasoning_effort") or body.get("reasoningEffort")
-    # 档位也可能写在 thinking.effort 里（Anthropic 风格，也常见于 OpenAI 兼容
-    # 客户端）——只看顶层字段会漏判，后续兜底就会把客户端显式要的 low 盖成 high。
-    if not effort and isinstance(thinking, dict):
-        inner = thinking.get("effort")
-        if isinstance(inner, str) and inner.strip():
-            effort = inner.strip()
-
-    if not opted_out and str(effort or "").strip().lower() != "none":
-        if "thinking" not in body:
+    if state is None:
+        # 没表态：是否默认开启由开关决定（两家上游口径不同，见该函数注释）
+        if _deepseek_thinking_default_on():
             body["thinking"] = {"type": "enabled"}
-        # 档位优先级：顶层 reasoning_effort > thinking.effort > 默认 high。
-        # 后两者都要写回 body：thinking.effort 只是局部变量，不写回的话
-        # 出站时仍只会看到顶层的 high（客户端显式要的 low 就白说了）。
-        body["reasoning_effort"] = effort or default_effort
+            body["reasoning_effort"] = fallback
+    elif opted_out:
+        # 明确关闭：字段已在上面的模型无关层清掉，这里只需补上游认得的开关
+        body["thinking"] = {"type": "disabled"}
+    else:
+        # 明确开启：档位优先取客户端显式的（并按模型支持列表归一），否则用默认档
+        effort = _explicit_effort(body)
+        _strip_thinking_aliases(body)
+        body["thinking"] = {"type": "enabled"}
+        body["reasoning_effort"] = normalize_effort(effort, model) if effort else fallback
 
     messages = body.get("messages")
     if isinstance(messages, list) and messages:
@@ -841,7 +1034,9 @@ PASSTHROUGH_BODY_KEYS = {
     # /gw 路径被白名单丢掉，后续的 DeepSeek 档位兜底看不到「已显式关闭」，
     # 反而补上 thinking=enabled + reasoning_effort=high —— 客户端要求不思考，
     # 却被强制开启思考。透传后兜底逻辑才能正确识别 disabled 并放行。
-    "thinking",
+    # enable_thinking / enableThinking 是三方客户端（如 mirai-mifan）用的异名，
+    # 同样必须放行，否则会被白名单丢弃、上游看不到思考意图。
+    "thinking", "enable_thinking", "enableThinking",
 }
 
 # ---------------------------------------------------------------------------

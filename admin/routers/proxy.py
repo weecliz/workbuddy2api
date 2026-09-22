@@ -82,7 +82,7 @@ try:
 except Exception:  # pragma: no cover - 降级分支
     _REASONING_FIX_AVAILABLE = False
 
-    def prepare_outbound_body(body, default_effort="high"):
+    def prepare_outbound_body(body, default_effort=None):
         # 降级时也要清掉 Anthropic 侧的临时意图键，否则它会随 body 发往上游。
         body.pop("__thinking_intent", None)
         return body
