@@ -162,6 +162,32 @@
 
 ### 修复
 
+- **Anthropic 请求的 `thinking` 被直接丢弃，Claude Code 思维链一直为空**
+  （`core/anthropic_adapter.py` + `core/converter.py`）：原实现的 docstring 写着
+  「`metadata` / `thinking` → 丢弃」，客户端显式请求思考时后端仍按「不思考」应答。
+  现按直接上游 xiaofan6ya/workbuddy2api 的实测口径翻译：`thinking.type=disabled`
+  → 不思考；`enabled` → 有 `effort` 用 effort，否则兜底 `high`
+  （后端不认 `budget_tokens`，实测传它被静默忽略）。
+  - **刻意分两阶段实现**：adapter 只把意图存进临时键 `__thinking_intent`，由
+    `apply_thinking_intent` 在**模型映射之后**落实。原因：`/v1/messages` 的时序是
+    「先 `anthropic_request_to_chat()`，再用 `_map_anthropic_model` 把
+    `claude-sonnet-4` 映射成本号池的真实模型」；若在映射前就写 `reasoning_effort`，
+    即使最终落到 `glm-5.2` 这类**非 DeepSeek** 模型也会带着 DeepSeek 专属参数出站
+    （该问题已在实测中发现并修正）。临时键在出站前一律清除，不泄往上游。
+- **DeepSeek 缺推理档位时思维链被静默丢弃**（`core/converter.py`）：只开
+  `thinking` 而不带档位，后端仍按「不思考」应答。参考实现 hub 的实测数字
+  （deepseek-v4.1-flash、同一 prompt）：`enabled` 无档位 → `reasoning_tokens 0`、
+  `reasoning_content` 长度 0；`reasoning_effort=high` → `37` / 长度 `117`。
+  现缺档时兜底补 `high`；客户端显式给的档位**永不覆盖**，
+  `disabled` / `effort=none` 照常退出（不被迫思考）。
+- **`reasoning_content` 未回填，缺思维链的历史会被上游拒**（`core/converter.py`）：
+  新增 `backfill_reasoning_content()`，口径对齐 hub `wb_proxy.py:2087`：
+  两半条件（thinking 开启 **或** 历史已有痕迹）→ 给每条 assistant 消息补齐
+  `reasoning_content`，非字符串值视为缺失，并镜像到 `reasoning` 且保证非空
+  （上游校验非空，单个空格能过校验且不携带模型可见语义）。
+
+  以上两项只对 **DeepSeek 系模型**生效（与参考实现一致），非 DeepSeek 不受影响。
+
 - **「真实积分回写」从未生效**（`admin/routers/proxy.py`）：`_fetch_real_credits()` 里
   写的是裸名 `AccountSession(auth_json)`，但本模块只 `import backend`、从未裸导入该名字，
   运行时必抛 `NameError`；而它被函数末尾的 `except Exception` 吞掉、只在日志里留一行

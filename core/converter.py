@@ -41,6 +41,137 @@ import uvicorn
 _HTTP_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=20)
 
 
+# ---------------------------------------------------------------------------
+# 推理（思维链）相关处理
+#
+# 口径对齐参考实现 workbuddy2api-hub 的 wb_proxy.py（backfill_reasoning_content /
+# build_upstream_body 的 thinking 注入段）。以下两条只对 DeepSeek 系生效。
+# ---------------------------------------------------------------------------
+
+def _is_deepseek(model) -> bool:
+    return bool(model) and str(model).lower().startswith("deepseek")
+
+
+def backfill_reasoning_content(messages: list, model, thinking_enabled=None) -> list:
+    """给 assistant 消息补齐 reasoning_content（仅 DeepSeek）。
+
+    背景（hub 逆向注释）：上游在 thinking 模式下要求**每条** assistant 消息都带
+    `reasoning_content` 字符串。客户端常常写不回旧轮的思维链（历史里缺失），
+    这些历史会被上游拒。
+
+    两半条件（缺一不可）：
+      - thinkingEnabled：只要 thinking 开启就回填，不依赖历史里已有痕迹
+      - hasTrace：历史里已经有 reasoning（哪怕 thinking 关闭）也回填
+
+    处理细节：
+      - `reasoning_content` 非字符串（null/数字/缺失）一律视为缺失，用 `reasoning`
+        兜底，再不行用空串（对齐官方 `typeof !== "string"` 检查）
+      - 同时把值镜像到 `reasoning` 且**保证非空**：上游校验非空，
+        而单个空格能过长度校验且不携带模型可见语义
+    """
+    if not _is_deepseek(model):
+        return messages
+    if thinking_enabled is None:
+        thinking_enabled = False
+
+    has_trace = False
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        r = m.get("reasoning")
+        if isinstance(r, str) and r:
+            has_trace = True
+            break
+        if "reasoning_content" in m:
+            has_trace = True
+            break
+    if not thinking_enabled and not has_trace:
+        return messages
+
+    out = []
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "assistant":
+            item = dict(m)
+            rc = item.get("reasoning_content")
+            if not isinstance(rc, str):
+                legacy = item.get("reasoning")
+                rc = legacy if isinstance(legacy, str) else ""
+                item["reasoning_content"] = rc
+            existing = item.get("reasoning")
+            if not (isinstance(existing, str) and existing):
+                item["reasoning"] = rc if rc else " "
+            out.append(item)
+        else:
+            out.append(m)
+    return out
+
+
+def resolve_thinking_state(body: dict, model) -> bool:
+    """判断本次请求是否处于「思考开启」状态（仅 DeepSeek）。
+
+    退出条件（任一命中即视为不思考）：
+      - `thinking.type == "disabled"`
+      - `reasoning_effort` / `reasoningEffort` 为 "none"
+    默认视为开启 —— 这与官方“不显式关就思考”的行为一致。
+    """
+    if not _is_deepseek(model):
+        return False
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict):
+        if str(thinking.get("type") or "").strip().lower() == "disabled":
+            return False
+    effort = body.get("reasoning_effort") or body.get("reasoningEffort")
+    if str(effort or "").strip().lower() == "none":
+        return False
+    return True
+
+
+def inject_deepseek_reasoning(body: dict, default_effort: str = "high") -> dict:
+    """出站前的 DeepSeek 推理处理：档位兜底 + reasoning_content 回填（原地修改并返回）。
+
+    为什么需要档位兜底（hub 实测，deepseek-v4.1-flash、同一 prompt）：
+        enabled + 无档位  -> reasoning_tokens 0,   reasoning_content len 0
+        reasoning_effort=high -> reasoning_tokens 37, reasoning_content len 117
+    即：只开 thinking 而不带档位，上游仍按“不思考”应答，思维链被静默丢弃。
+
+    原则（与 hub 一致）：
+      - 客户端显式指定的档位**永不覆盖**
+      - `thinking.type=disabled` / `effort=none` 照常退出，不被迫思考
+      - 只对 DeepSeek 系生效
+    """
+    model = body.get("model")
+    if not _is_deepseek(model):
+        # 非 DeepSeek：不注入任何推理参数，但要把 Anthropic 侧的临时意图键清掉。
+        # 否则它会随 body 一起发往上游（无效字段，无价值且可能引起校验问题）。
+        if THINKING_INTENT_KEY in body:
+            body.pop(THINKING_INTENT_KEY, None)
+        return body
+
+    # 先把 Anthropic 遗留的思考意图落实成后端参数（非 DeepSeek 时丢弃）。
+    # 必须在模型已知之后做：_map_anthropic_model 会把 claude-sonnet-4 之类
+    # 映射到本号池的真实模型，映射前就写 effort 会误带到非 DeepSeek 模型上。
+    # 也必须在下面「档位兜底」之前做 —— 否则兜底先写入 high，
+    # 客户端在 thinking.effort 里指定的 low 就会被 setdefault 挡掉。
+    apply_thinking_intent(body, model)
+
+    thinking = body.get("thinking")
+    opted_out = isinstance(thinking, dict) and \
+        str(thinking.get("type") or "").strip().lower() == "disabled"
+    effort = body.get("reasoning_effort") or body.get("reasoningEffort")
+
+    if not opted_out and str(effort or "").strip().lower() != "none":
+        if "thinking" not in body:
+            body["thinking"] = {"type": "enabled"}
+        if not effort:
+            body["reasoning_effort"] = default_effort
+
+    messages = body.get("messages")
+    if isinstance(messages, list) and messages:
+        body["messages"] = backfill_reasoning_content(
+            messages, model, thinking_enabled=resolve_thinking_state(body, model))
+    return body
+
+
 def _client_ip_headers(request: Request, purpose: str = "conversation") -> dict:
     """提取真实客户端 IP 与用途/产品头，透传给上游，避免请求用量里 client/agentPurpose 为空。
 
@@ -92,6 +223,8 @@ from .responses_projection import project_responses_chat_body
 from .anthropic_adapter import (
     anthropic_request_to_chat,
     AnthropicStreamConverter,
+    apply_thinking_intent,
+    THINKING_INTENT_KEY,
 )
 
 # ---------------------------------------------------------------------------
@@ -698,6 +831,10 @@ async def chat_completions(request: Request,
                                 compact_harness=not CONFIG.get("no_compact"),
                                 strip_tool_metadata=True)
 
+    # DeepSeek 推理处理（档位兜底 + reasoning_content 回填）。放在脱敏之后：
+    # 脱敏会重写消息内容，先脱敏再回填才能保证最终出站的 body 已补齐。
+    body = inject_deepseek_reasoning(body)
+
     # 日志：请求摘要
     model_name = payload.get("model", "auto")
     tool_names = [t.get("function", {}).get("name") for t in (payload.get("tools") or [])
@@ -1031,6 +1168,8 @@ async def create_response(request: Request,
     chat_custom_names = custom_tool_names(payload.get("tools"))
 
     chat_body = _chat_body_desensitize(chat_body)
+    # DeepSeek 推理处理（同 chat_completions：脱敏之后再回填）
+    chat_body = inject_deepseek_reasoning(chat_body)
 
     client_wants_stream = payload.get("stream", True)  # Codex CLI 默认 stream
     model_name = payload.get("model", "auto")
@@ -1164,6 +1303,9 @@ async def create_message(request: Request,
                                      desensitize_tools=True,
                                      compact_harness=not CONFIG.get("no_compact"),
                                      strip_tool_metadata=True)
+
+    # DeepSeek 推理处理（同 chat_completions：脱敏之后再回填）
+    chat_body = inject_deepseek_reasoning(chat_body)
 
     model_name = payload.get("model", "auto")
     chat_messages = chat_body.get("messages", [])

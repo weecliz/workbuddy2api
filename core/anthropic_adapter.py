@@ -35,7 +35,7 @@ def anthropic_request_to_chat(body: dict) -> dict:
       system → messages[0] role=system
       messages[].content (blocks) → content (string) / tool_calls / tool role
       tools[].input_schema → tools[].function.parameters
-      metadata / thinking → 丢弃
+      thinking → reasoning_effort（见下），metadata 丢弃
     """
     messages: list[dict] = []
 
@@ -79,7 +79,64 @@ def anthropic_request_to_chat(body: dict) -> dict:
         if key in body:
             chat[key] = body[key]
 
+    # thinking → 思考意图
+    #
+    # Anthropic 用 thinking:{type:"enabled", budget_tokens:N} 表达「要思考」，
+    # 而后端只认扁平的 reasoning_effort，且**不识别** budget_tokens（实测：传
+    # thinking / budget_tokens 都被静默忽略，reasoning_content 为空）。
+    #
+    # ⚠️ 这里**只记录意图**，不直接写 reasoning_effort。原因 /v1/messages 的
+    # 时序是「先调本函数，再用 _map_anthropic_model 把 claude-sonnet-4 映射成
+    # 上游真实模型」——在这里就写 effort 的话，即使最终映射到 glm-5.2 这类
+    # 非 DeepSeek 模型也会带着 DeepSeek 专属的思考参数出站。
+    #
+    # 因此：意图放进 __thinking_intent 这个临时键，由调用方在模型确定后
+    # 交给 inject_deepseek_reasoning 判定（它只对 deepseek 生效），
+    # 并在出站前由 _strip_thinking_intent 清掉这个内部键。
+    #
+    # 映射口径（与直接上游 xiaofan6ya/workbuddy2api 的 anthropic_adapter 一致）：
+    #   type == "disabled" → 不思考
+    #   type == "enabled"  → 思考；有 effort 用 effort，否则兜底 high
+    thinking = body.get("thinking")
+    if isinstance(thinking, dict):
+        ttype = str(thinking.get("type") or "").strip().lower()
+        if ttype == "disabled":
+            chat["__thinking_intent"] = "disabled"
+        elif ttype == "enabled":
+            effort = thinking.get("effort")
+            if not (isinstance(effort, str) and effort.strip()):
+                effort = "high"
+            chat["__thinking_intent"] = effort.strip()
+    elif isinstance(thinking, str) and thinking.strip().lower() == "enabled":
+        chat["__thinking_intent"] = "high"
+
     return chat
+
+
+# 内部临时键：承载 Anthropic thinking 的原始意图，出站前必须清除。
+THINKING_INTENT_KEY = "__thinking_intent"
+
+
+def apply_thinking_intent(chat: dict, model) -> dict:
+    """把 __thinking_intent 落实成后端参数，并清除该内部键（原地修改并返回）。
+
+    必须在模型已经映射成上游真实模型**之后**调用：只有到那时才能判断
+    本次请求是否真的落在 DeepSeek 系上。
+    """
+    intent = chat.pop(THINKING_INTENT_KEY, None)
+    if not intent:
+        return chat
+    if not _is_deepseek_model(model):
+        return chat          # 非 DeepSeek：丢弃意图，不泄漏 DeepSeek 参数
+    if intent == "disabled":
+        chat["thinking"] = {"type": "disabled"}
+    else:
+        chat.setdefault("reasoning_effort", intent)
+    return chat
+
+
+def _is_deepseek_model(model) -> bool:
+    return bool(model) and str(model).lower().startswith("deepseek")
 
 
 def _extract_system_text(system) -> str:
