@@ -149,9 +149,10 @@ def make_selector(accounts):
     """按 exclude_ids 跳过已尝试账号，模拟 _select_account 的换号语义。"""
     calls = []
 
-    def _sel(db, exclude_ids=None, min_balance=1, mark_picked=True):
+    def _sel(db, exclude_ids=None, min_balance=1, mark_picked=True, affinity_key=None):
         excl = set(exclude_ids or ())
-        calls.append({"exclude_ids": set(excl), "min_balance": min_balance})
+        calls.append({"exclude_ids": set(excl), "min_balance": min_balance,
+                      "affinity_key": affinity_key})
         for a in accounts:
             if a.id not in excl:
                 return a

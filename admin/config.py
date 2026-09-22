@@ -97,6 +97,16 @@ class Settings:
     # 账号选择策略：remain（剩余最多优先）/ lru（最久未用优先）
     ACCOUNT_SELECT = os.getenv("ADMIN_ACCOUNT_SELECT", "remain")
 
+    # 会话亲和：把同一对话的连续轮次固定到同一账号，以命中上游「按账号隔离」的
+    # 前缀缓存。不开的话，选号随余额/使用时间变化 —— 长对话每轮都可能落到不同
+    # 账号，上一轮的缓存全部作废（参考实现 hub 实测：缓存率 0% → 95.2%）。
+    # 亲和只是优化：绑定账号不可用时自动解绑并走常规选号，不影响可用性。
+    # 关闭用 ADMIN_ACCOUNT_AFFINITY=0。
+    ACCOUNT_AFFINITY = os.getenv("ADMIN_ACCOUNT_AFFINITY", "1") != "0"
+    # 绑定有效期（秒，滑动续期）与绑定表容量上限（超出按到期时间丢最旧的）
+    ACCOUNT_AFFINITY_TTL = int(os.getenv("ADMIN_ACCOUNT_AFFINITY_TTL", "7200"))
+    ACCOUNT_AFFINITY_MAX = int(os.getenv("ADMIN_ACCOUNT_AFFINITY_MAX", "5000"))
+
     # 登录防爆破：同一 IP 在窗口内失败超过阈值即锁定一段时间
     LOGIN_MAX_ATTEMPTS = int(os.getenv("ADMIN_LOGIN_MAX_ATTEMPTS", "5"))
     LOGIN_WINDOW_SECONDS = int(os.getenv("ADMIN_LOGIN_WINDOW_SECONDS", "300"))  # 5 分钟窗口

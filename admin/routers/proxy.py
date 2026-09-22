@@ -18,6 +18,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from admin import backend
+from admin.affinity import derive_affinity_key, get_affinity
 from admin.config import settings
 from admin.db import SessionLocal, get_db
 from admin.models import Account, ApiKey, ModelConfig, UsageLog
@@ -314,7 +315,10 @@ def _fetch_real_credits(log_id: int, account_id: int, auth_json: str, model: str
                 log = db.query(UsageLog).filter(UsageLog.id == log_id).first()
                 if log is None:
                     return
-                delta = real - log.credits
+                # log.credits 列可空（Mapped[Optional[float]]）。本文件对可空数值列
+                # 统一用 `or 0` 兼容（同函数内 L324 的 credit_used、L327 的
+                # balance_remain 皆如此），此处对齐，避免历史 NULL 行触发 TypeError。
+                delta = real - (log.credits or 0.0)
                 if abs(delta) < 0.0001:
                     return
                 log.credits = real
@@ -492,12 +496,18 @@ _CREDIT_RE = re.compile(r"x\s*([0-9]+(?:\.[0-9]+)?)")
 
 
 def _select_account(db: Session, exclude_ids: set | None = None,
-                    min_balance: int = 1, mark_picked: bool = True) -> Account | None:
+                    min_balance: int = 1, mark_picked: bool = True,
+                    affinity_key: str | None = None) -> Account | None:
     """从健康账号池中挑选一个账号。
 
     健康条件：active、有余额、不在冷却期、不在 exclude_ids 中。
     防撞号：优先跳过 last_picked_at 距今 < 100ms 的账号；若全部刚被用过则兜底。
     挑选策略默认按 balance_remain 降序（也可切 LRU）。
+
+    会话亲和（affinity_key 非空时）：优先复用该对话已绑定的账号，以便命中上游
+    「按账号隔离」的前缀缓存；绑定账号当前不可用（冷却 / 无余额 / 已在本轮
+    exclude_ids 里）时**解绑**，走常规选号后把新账号绑上 —— 保证请求始终发得
+    出去，亲和只是优化而非可用性依赖。
     """
     now = datetime.utcnow()
     q = db.query(Account).filter(Account.status == "active")
@@ -507,6 +517,21 @@ def _select_account(db: Session, exclude_ids: set | None = None,
     if exclude_ids:
         q = q.filter(~Account.id.in_(exclude_ids))
     q = q.filter(or_(Account.cool_until.is_(None), Account.cool_until <= now))
+
+    # 会话亲和：优先复用本条对话绑定的账号。q 已含全部健康性过滤，
+    # 所以绑定账号若不健康（冷却 / 无余额 / 已被 exclude）会查不到 → 落到解绑分支。
+    if affinity_key:
+        aff = get_affinity()
+        bound_id = aff.get(affinity_key)
+        if bound_id is not None:
+            bound = q.filter(Account.id == bound_id).first()
+            if bound is not None:
+                if mark_picked:
+                    bound.last_picked_at = now
+                    db.commit()
+                return bound
+            # 绑定账号已不可用：解绑，让它跟着本次重新选出的账号走
+            aff.unbind(affinity_key)
 
     # 防撞号窗口：100ms 内不重复选中同一账号
     anti = now - timedelta(milliseconds=100)
@@ -525,6 +550,9 @@ def _select_account(db: Session, exclude_ids: set | None = None,
     if acc and mark_picked:
         acc.last_picked_at = now
         db.commit()
+    # 把本次选中的账号与这条对话绑定：下一轮直接复用，命中上游前缀缓存
+    if acc is not None and affinity_key:
+        get_affinity().bind(affinity_key, acc.id)
     return acc
 
 
@@ -834,6 +862,12 @@ async def _proxy_loop(
     非流式模式：本函数不对外 yield 任何块，端点以 `async for _ in ...: pass` 驱动，
     然后取 out.take() 作为响应返回。
     """
+    # 会话亲和键：由「对话稳定前缀 + 租户（API Key id）」派生，把同一对话固定到
+    # 同一账号以命中上游按账号隔离的前缀缓存。派生失败时为 None（退化为无亲和）。
+    affinity_key = None
+    if settings.ACCOUNT_AFFINITY:
+        affinity_key = derive_affinity_key(chat_body.get("messages"), scope=key_id)
+
     db2 = SessionLocal()
     try:
         request_start = time.perf_counter()
@@ -856,7 +890,8 @@ async def _proxy_loop(
                     body = prepare_outbound_body(body)
                 tried_ids: set = set()
                 for _ in range(3):
-                    acc = _select_account(db2, exclude_ids=tried_ids, min_balance=1)
+                    acc = _select_account(db2, exclude_ids=tried_ids, min_balance=1,
+                                          affinity_key=affinity_key)
                     if not acc:
                         break
                     tried_ids.add(acc.id)
