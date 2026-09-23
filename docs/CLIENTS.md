@@ -48,6 +48,12 @@ codex --profile workbuddy "你的任务描述"
   `400 {"code":11128,"msg":"Illegal API invocation from an unapproved channel"}`。
   ⚠️ 排查提示：不脱敏时简单的 `"hello"` 请求**能通过**，只有真实 Claude Code 的完整 harness 才会被拦，
   所以**不要用 hello 请求验证这个端点**。
+- **思考（extended thinking）**：客户端开思考时，服务端会把上游的 `reasoning_content`
+  转成 Anthropic 的 thinking 内容块返回（`content_block_start{type:"thinking"}` →
+  `thinking_delta` → `signature_delta` → `content_block_stop`），Claude Code 会照常
+  渲染思考块。⚠️ 但思考**参数**只对 **DeepSeek 系**模型落地：`glm-*` / `hy4-*` 会忽略
+  `thinking` / `reasoning_effort`（不报错，但也不思考）。若想让某一档一定出思考，
+  把对应档位映射到 `deepseek-*`，例：`ADMIN_ANTHROPIC_MODEL_SONNET=deepseek-v4-pro`。
 
 **B. 走本机直连（`8787`，`python converter.py`）—— 只用自己的桌面端登录态，无配额**
 

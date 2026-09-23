@@ -216,6 +216,14 @@ def _convert_anthropic_message(msg: dict) -> list[dict]:
                     },
                 }
                 tool_calls.append(tc)
+        # 只有 thinking 块（无正文、无工具调用）的 assistant 消息，转换后就是
+        # {"role":"assistant","content":null} —— 不带 tool_calls 的裸空 assistant
+        # 不是合法的 Chat 消息，直接丢弃整条而不是发给上游。
+        # 该形态来自客户端回传我们新发出的 thinking 块（模型在思考中途被 max_tokens
+        # 截断时，assistant 消息可能只有 thinking）。
+        if not text_parts and not tool_calls:
+            return []
+
         msg_out: dict[str, Any] = {"role": "assistant"}
         if text_parts:
             msg_out["content"] = "".join(text_parts)
@@ -266,6 +274,14 @@ def _convert_anthropic_tools(tools: list) -> list:
 # 响应转换：Chat SSE → Anthropic Messages SSE
 # ---------------------------------------------------------------------------
 
+# Anthropic 的 thinking 块必须带非空 `signature`（官方 API 用它校验「块由 Claude
+# 生成」，并对回传的块做签名比对）。本项目上游是 OpenAI 协议、没有签名机制，而客户端
+# 把块回传时又会被 anthropic_request_to_chat 忽略（它只处理 text / tool_use），
+# 所以这里填固定占位值即可 —— 只要非空，客户端就存得下、回传得动。
+# 取 base64("workbuddy2api")，形态上是合法的 base64 串。
+_THINKING_SIGNATURE = "d29ya2J1ZGR5MmFwaQ=="
+
+
 class AnthropicStreamConverter:
     """将 OpenAI Chat SSE 流实时转换为 Anthropic Messages SSE 事件流。
 
@@ -285,6 +301,14 @@ class AnthropicStreamConverter:
 
         # 状态
         self._emitted_start = False
+
+        # thinking 内容块（Anthropic 扩展思考，来源是上游的 reasoning_content）
+        self._thinking_content = ""
+        self._thinking_block_open = False
+        self._thinking_block_idx = 0
+        # 正文 / 工具调用是否已经开始。Anthropic 的块顺序是 thinking → text → tool_use，
+        # 该标记一旦置位，之后到达的 reasoning 就只能丢弃（流式无法插回前面）。
+        self._saw_other_block = False
 
         # text 内容块
         self._text_content = ""
@@ -319,6 +343,9 @@ class AnthropicStreamConverter:
     def finish(self) -> str:
         """流结束，发出收尾事件。"""
         events: list[str] = []
+
+        # 关闭 thinking 块（顺序上必须排在其它的块之前）
+        self._close_thinking_block(events)
 
         # 关闭 text 块
         if self._text_block_open:
@@ -443,9 +470,16 @@ class AnthropicStreamConverter:
             delta = choice.get("delta", {})
             finish = choice.get("finish_reason")
 
+            # reasoning_content delta（DeepSeek 系思维链）→ Anthropic thinking 块
+            reasoning = delta.get("reasoning_content")
+            if reasoning:
+                self._append_thinking(reasoning, events)
+
             # content delta
             content = delta.get("content")
             if content:
+                self._saw_other_block = True
+                self._close_thinking_block(events)
                 self._text_content += content
                 if not self._text_block_open:
                     self._text_block_idx = self._next_block_idx
@@ -461,6 +495,9 @@ class AnthropicStreamConverter:
                 }))
 
             # tool_calls delta
+            if delta.get("tool_calls"):
+                self._saw_other_block = True
+                self._close_thinking_block(events)
             for tc in delta.get("tool_calls", []):
                 idx = tc.get("index", 0)
                 if idx not in self._tool_uses:
@@ -498,6 +535,7 @@ class AnthropicStreamConverter:
                 self._finish_reason = finish
 
                 # finish_reason 出现时关闭当前打开的块
+                self._close_thinking_block(events)
                 if self._text_block_open:
                     events.append(self._evt("content_block_stop", {
                         "index": self._text_block_idx
@@ -513,6 +551,44 @@ class AnthropicStreamConverter:
 
         return "".join(events)
 
+    def _append_thinking(self, text: str, events: list[str]) -> None:
+        """把上游的 reasoning_content 追加到 thinking 块（必要时先开块）。
+
+        只在正文 / 工具调用尚未开始时空转：Anthropic 要求 thinking 块排在所有
+        其它的块之前，而流式下无法把内容插回已有块的前面。DeepSeek 系的上游
+        本身就是「先 reasoning 后 content」，正常时序不会走到丢弃分支。
+        """
+        if self._saw_other_block:
+            return
+        if not self._thinking_block_open:
+            self._thinking_block_idx = self._next_block_idx
+            self._next_block_idx += 1
+            events.append(self._evt("content_block_start", {
+                "index": self._thinking_block_idx,
+                "content_block": {"type": "thinking", "thinking": ""},
+            }))
+            self._thinking_block_open = True
+        self._thinking_content += text
+        events.append(self._evt("content_block_delta", {
+            "index": self._thinking_block_idx,
+            "delta": {"type": "thinking_delta", "thinking": text},
+        }))
+
+    def _close_thinking_block(self, events: list[str]) -> None:
+        """关闭已打开的 thinking 块（幂等）。
+
+        关闭前补一个 signature_delta：官方流里它排在 content_block_stop 之前，
+        少了它客户端聚合出的块就没有 signature 字段。
+        """
+        if not self._thinking_block_open:
+            return
+        events.append(self._evt("content_block_delta", {
+            "index": self._thinking_block_idx,
+            "delta": {"type": "signature_delta", "signature": _THINKING_SIGNATURE},
+        }))
+        events.append(self._evt("content_block_stop", {"index": self._thinking_block_idx}))
+        self._thinking_block_open = False
+
     def _evt(self, event_type: str, data: dict) -> str:
         """格式化一个 Anthropic SSE 事件（含 event: 行）。"""
         payload = {"type": event_type, **data}
@@ -521,6 +597,14 @@ class AnthropicStreamConverter:
     def _build_content_blocks(self) -> list[dict]:
         """构造完整的 content blocks 数组（用于非流式响应）。"""
         blocks: list[dict] = []
+
+        # thinking block（必须排在 text / tool_use 之前）
+        if self._thinking_content:
+            blocks.append({
+                "type": "thinking",
+                "thinking": self._thinking_content,
+                "signature": _THINKING_SIGNATURE,
+            })
 
         # text block
         if self._text_content or self._text_block_open:

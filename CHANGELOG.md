@@ -181,6 +181,27 @@
 
 ### 修复
 
+- **Anthropic 端点的思考内容从未转发给客户端，Claude Code 思维链恒为空**
+  （`core/anthropic_adapter.py`）：请求侧早已把 `thinking` 翻成 `reasoning_effort`
+  （见下条），但响应侧的 `AnthropicStreamConverter` 只认 `delta.content` 与
+  `delta.tool_calls`，**从不读 `delta.reasoning_content`** —— 上游即使产出了思维链，
+  `/v1/messages` 也一个 `thinking_delta` 都不发，非流式聚合的 `content` 数组里同样
+  没有 thinking 块。结果是「上游思考了，客户端也看不到」。
+  - **修复**：把 `reasoning_content` 转成 Anthropic 的 thinking 内容块
+    （`content_block_start{type:"thinking"}` → `thinking_delta` → `signature_delta`
+    → `content_block_stop`），并保证块顺序为 thinking → text → tool_use
+    （Anthropic 要求 thinking 排在最前，而流式无法回退，所以正文 / 工具调用已经开始后
+    才到达的 reasoning 一律丢弃）。非流式两条出口（`build_message()` 与
+    `get_nonstream_response()`）同样补上 thinking 块。
+  - `signature` 用固定占位值 `base64("workbuddy2api")`：官方用它校验「块由 Claude
+    生成」，本项目上游是 OpenAI 协议、没有该机制，客户端回传时也会被
+    `anthropic_request_to_chat` 忽略，所以只需非空，以满足客户端对「signature 必填」的
+    形状要求。
+  - **顺带堵住一条由本次修复才可能出现的新路径**：客户端把上一轮的 thinking 块原样
+    回传时，若那条 assistant 消息**只有** thinking 块（模型在思考中途被 `max_tokens`
+    截断），转换结果会是 `{"role":"assistant","content":null}` —— 不带 `tool_calls`
+    的裸空 assistant 不是合法的 Chat 消息。现在直接丢弃整条消息。
+
 - **工具调用配对不自愈，一次失败调用即让整条会话报废**（`core/converter.py`）：
   上游要求 `role:"tool"` 的结果消息**紧跟**请求它的 assistant 消息，中间不能有
   其他消息，否则整条请求被拒：`400 code 11148 "tool calls and tool results do not

@@ -492,3 +492,68 @@ def test_nonstream_retry_switches_account(_patch_db, monkeypatch):
     assert out.response == {"lines": 1}
     assert len(sel.calls) == 2
     assert acc1.cool_kind == "soft_rate"
+
+
+# ---------------------------------------------------------------------------
+# Anthropic 端点的思考透传（响应侧）—— 走真实 make_consumer 接线
+#
+# 复刻 proxy.py /v1/messages 流式路径的 consume 回调，验证上游的
+# reasoning_content 真的会被转成 Anthropic 的 thinking 块发出去。
+# ---------------------------------------------------------------------------
+
+class FakeLineStreamResp(FakeStreamResp):
+    """按行读取的假上游响应（Anthropic 路径用 aiter_lines）。"""
+
+    async def aiter_lines(self):
+        for c in self._chunks:
+            for ln in c.splitlines():
+                yield ln
+
+
+ANTHROPIC_REASONING_CHUNKS = [
+    'data: {"model":"deepseek-v4.1-flash","choices":[{"delta":{"reasoning_content":"让我想想"}}]}\n\n',
+    'data: {"model":"deepseek-v4.1-flash","choices":[{"delta":{"content":"答案"}}]}\n\n',
+    'data: {"model":"deepseek-v4.1-flash","choices":[{"delta":{},"finish_reason":"stop"}],'
+    '"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}\n\n',
+    'data: [DONE]\n\n',
+]
+
+
+def anthropic_consumer():
+    """与 proxy.py 的 /v1/messages 流式 consume 同形。"""
+    from core.anthropic_adapter import AnthropicStreamConverter
+
+    async def consume(r, att):
+        conv = AnthropicStreamConverter(model="deepseek-v4.1-flash")
+        att.usage_join = "\n"
+        async for line in r.aiter_lines():
+            if not line.strip():
+                continue
+            att.mark_ttfb()
+            att.usage_parts.append(line)
+            events = conv.feed_line(line)
+            if events:
+                att.delivered = True
+                yield events
+        tail = conv.finish()
+        if tail:
+            yield tail
+    return consume
+
+
+def test_anthropic_path_emits_thinking_block(_patch_db, monkeypatch):
+    """上游 reasoning_content → 客户端收到 thinking_delta（修复前一个都没有）。"""
+    acc = FakeAcc(1)
+    monkeypatch.setattr(proxy, "_select_account", make_selector([acc]))
+    install_fake_httpx(monkeypatch,
+                       [FakeLineStreamResp(200, chunks=ANTHROPIC_REASONING_CHUNKS)])
+    rec, ece, eex = rec_emitters()
+
+    kw = base_kwargs(anthropic_consumer, ece, eex)
+    kw.update(order=["deepseek-v4.1-flash"], initial_model="deepseek-v4.1-flash")
+    blob = "".join(run_loop(**kw))
+
+    assert "thinking_delta" in blob, "修复后必须有思考事件"
+    assert "signature_delta" in blob, "thinking 块要带 signature"
+    assert blob.index('"type": "thinking"') < blob.index('"type": "text"')
+    assert rec["client_error"] == [] and rec["exhausted"] == []
