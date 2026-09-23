@@ -146,7 +146,11 @@
           <thead class="bg-slate-50 text-slate-500 text-left sticky top-0">
             <tr>
               <th class="px-4 py-3">名称</th><th class="px-4 py-3">UID</th><th class="px-4 py-3">状态</th>
-              <th class="px-4 py-3">总积分</th><th class="px-4 py-3">剩余</th><th class="px-4 py-3" title="成长中心连登天数，刷新余额时顺带同步">活跃</th><th class="px-4 py-3">同步</th><th class="px-4 py-3 text-right">操作</th>
+              <th class="px-4 py-3"><button type="button" onclick="toggleAccSort('total')" id="thAccTotal"
+                class="inline-flex items-center gap-1 hover:text-slate-700 font-medium" title="点击切换总积分排序（降序 → 升序 → 默认）">总积分 <i class="fa-solid fa-sort text-slate-300"></i></button></th>
+              <th class="px-4 py-3"><button type="button" onclick="toggleAccSort('remain')" id="thAccRemain"
+                class="inline-flex items-center gap-1 hover:text-slate-700 font-medium" title="点击切换剩余积分排序（降序 → 升序 → 默认）。剩余决定该号是否会被选中">剩余 <i class="fa-solid fa-sort text-slate-300"></i></button></th>
+              <th class="px-4 py-3" title="成长中心连登天数，刷新余额时顺带同步">活跃</th><th class="px-4 py-3">同步</th><th class="px-4 py-3 text-right">操作</th>
             </tr>
           </thead>
           <tbody id="accBody"></tbody>
@@ -600,6 +604,9 @@ function badge(st) {
 const PS = 10;
 let _accData = [], _keyData = [], _modelData = [];
 let _accTerm = "", _keyTerm = "", _modelTerm = "";
+// 账号积分排序："" = 默认（保持后端顺序，即新账号在前）
+// 取值：total_desc / total_asc / remain_desc / remain_asc
+let _accSort = "";
 let _modelPage = 1;  // 模型配置当前页：跨操作与浏览器刷新保持
 // 模型列表排序：'default'(按 id) | 'mult_asc' | 'mult_desc'
 let _modelSort = "default";
@@ -664,11 +671,59 @@ async function loadAccounts() {
     ${card("总积分", s.balance_total, "fa-coins", "text-amber-600")}
     ${card("总剩余", s.balance_remain, "fa-wallet", "text-rose-600")}`;
   _accData = d.items || [];
+  // 恢复上次的排序选择（浏览器刷新 / 切页后保持）
+  try {
+    const s = localStorage.getItem("wb_acc_sort");
+    if(["total_desc","total_asc","remain_desc","remain_asc"].includes(s)) _accSort = s;
+  } catch(e) {}
+  updateAccSortIcons();
   renderAccPage(1);
+}
+
+/* 账号积分排序（总积分 / 剩余，各自降序→升序→默认循环） */
+function toggleAccSort(col){
+  const desc = col + "_desc", asc = col + "_asc";
+  _accSort = _accSort === desc ? asc : _accSort === asc ? "" : desc;
+  try { localStorage.setItem("wb_acc_sort", _accSort); } catch(e) {}
+  updateAccSortIcons();
+  renderAccPage(1);  // 排序后回到第一页，避免停在中段看不到结果
+}
+// 表头箭头指示当前排序列与方向
+function updateAccSortIcons(){
+  for(const [col, id] of [["total","thAccTotal"],["remain","thAccRemain"]]){
+    const btn = document.getElementById(id);
+    if(!btn) continue;
+    const icon = btn.querySelector("i");
+    const dir = _accSort === col + "_desc" ? "d" : _accSort === col + "_asc" ? "u" : null;
+    icon.className = dir === "d" ? "fa-solid fa-sort-down text-indigo-500"
+                   : dir === "u" ? "fa-solid fa-sort-up text-indigo-500"
+                   : "fa-solid fa-sort text-slate-300";
+    btn.classList.toggle("text-indigo-600", !!dir);
+  }
+}
+function sortAccData(list){
+  if(!_accSort) return list;
+  const field = _accSort.startsWith("total") ? "balance_total" : "balance_remain";
+  const dir = _accSort.endsWith("_asc") ? 1 : -1;
+  // 未刷过余额的账号该字段为 null；必须显式当作 -Infinity 沉底。
+  // （直接 Number(null) 会得到 0，把「没数据」排在「真的为 0」之前，顺序会跳）
+  const val = a => {
+    const v = a[field];
+    if(v === null || v === undefined || v === "") return -Infinity;
+    const n = Number(v);
+    return isFinite(n) ? n : -Infinity;
+  };
+  // 复制后排序，不改动原数组（原数组还要供其它操作复用）
+  return list.slice().sort((a,b) => {
+    const d = (val(a) - val(b)) * dir;
+    if(d !== 0) return d;
+    return (b.id || 0) - (a.id || 0);  // 同积分按 ID 倒序，保证稳定
+  });
 }
 function renderAccPage(p) {
   const term = (_accTerm = ($("#accSearch") ? $("#accSearch").value : "").trim().toLowerCase());
-  const data = term ? _accData.filter(a => (a.name||"").toLowerCase().includes(term) || (a.uid||"").toLowerCase().includes(term)) : _accData;
+  const filtered = term ? _accData.filter(a => (a.name||"").toLowerCase().includes(term) || (a.uid||"").toLowerCase().includes(term)) : _accData;
+  const data = sortAccData(filtered);
   const total = data.length, totalPages = Math.max(1, Math.ceil(total / PS));
   p = Math.min(Math.max(1, p), totalPages);
   const slice = data.slice((p - 1) * PS, p * PS);
