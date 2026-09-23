@@ -238,9 +238,27 @@ def _interpreter_with_deps() -> str | None:
     return None
 
 
+def _resolve_port(cli_port) -> int:
+    """端口优先级：显式 `--port` > 环境变量 `ADMIN_PORT` > 8790。
+
+    显式传参必须压过 .env。否则 `python main.py --port 8791` 会去绑 .env 里的
+    8790：线上服务在跑时它直接 bind 失败退出；线上服务**不在跑**时它会占住
+    8790 —— 把「起个测试实例」变成「打死线上服务」。
+    """
+    raw = cli_port if cli_port is not None else os.getenv("ADMIN_PORT", "8790")
+    return int(raw)
+
+
+def _resolve_host(cli_host) -> str:
+    """监听地址优先级：显式 `--host` > 环境变量 `ADMIN_HOST` > 0.0.0.0。"""
+    if cli_host:
+        return str(cli_host)
+    return os.getenv("ADMIN_HOST", "0.0.0.0")
+
+
 def _build_admin_cmd(args) -> tuple[list[str], int, str]:
-    port = int(os.getenv("ADMIN_PORT", str(args.port)))
-    host = os.getenv("ADMIN_HOST", args.host)
+    port = _resolve_port(args.port)
+    host = _resolve_host(args.host)
     cmd = [PY, "-m", "uvicorn", "admin.server:app",
            "--host", host, "--port", str(port), "--log-level", "info"]
     return cmd, port, host
@@ -254,8 +272,10 @@ def _build_parser() -> argparse.ArgumentParser:
         epilog="数据库类型可选 mysql / db2 / sqlite；命令行参数优先级高于 .env，只影响本次启动。\n"
                "例：python main.py --db-type sqlite --db-name ./data/wb.db",
     )
-    ap.add_argument("--host", default="0.0.0.0", help="监听地址（默认 0.0.0.0）")
-    ap.add_argument("--port", type=int, default=8790, help="服务端口（默认 8790）")
+    ap.add_argument("--host", default=None,
+                    help="监听地址（显式指定时压过 ADMIN_HOST，缺省取 ADMIN_HOST / 0.0.0.0）")
+    ap.add_argument("--port", type=int, default=None,
+                    help="服务端口（显式指定时压过 ADMIN_PORT，缺省取 ADMIN_PORT / 8790）")
 
     g = ap.add_argument_group("数据库（覆盖 .env 里的同名配置，仅本次启动有效）")
     g.add_argument("--db-type", help="数据库类型：mysql | db2 | sqlite")
@@ -374,8 +394,8 @@ def main() -> None:
     except Exception:
         pass
 
-    admin_port = os.getenv("ADMIN_PORT", str(args.port))
-    bind_host = os.getenv("ADMIN_HOST", args.host)
+    admin_port = _resolve_port(args.port)
+    bind_host = _resolve_host(args.host)
     # 回显统一用回环地址：0.0.0.0 只是绑定通配符，不能直接当 URL 打开
     show_host = _display_host(bind_host)
     _log(f"[main] 单端口服务已启动（监听 {bind_host}:{admin_port}）：")

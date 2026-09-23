@@ -202,6 +202,14 @@
     截断），转换结果会是 `{"role":"assistant","content":null}` —— 不带 `tool_calls`
     的裸空 assistant 不是合法的 Chat 消息。现在直接丢弃整条消息。
 
+- **`--port` / `--host` 被 `.env` 反过来压住，「起测试实例」会打死线上服务**
+  （`main.py`）：原代码是 `int(os.getenv("ADMIN_PORT", str(args.port)))` —— 环境变量
+  永远赢，显式传参只在 `.env` 没配该项时才有意义。后果：线上服务在跑时
+  `python main.py --port 8791` 会去绑 `8790` 然后 bind 失败退出；线上**没在跑**时
+  它反过来占住 `8790` —— 把「起个测试实例」变成「打死线上服务」。
+  新增 `_resolve_port` / `_resolve_host`，口径改为「显式 CLI 参数 > `.env` > 默认值」，
+  与同文件里 `--db-*` 一组参数既有口径一致。
+
 - **工具调用配对不自愈，一次失败调用即让整条会话报废**（`core/converter.py`）：
   上游要求 `role:"tool"` 的结果消息**紧跟**请求它的 assistant 消息，中间不能有
   其他消息，否则整条请求被拒：`400 code 11148 "tool calls and tool results do not
