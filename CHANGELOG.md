@@ -14,6 +14,10 @@
 
 ### 变更
 
+- **`/gw/v1/messages` 也做 Anthropic 模型名映射**（`core/converter.py`）：
+  该端点此前对 `model` **完全不映射**，`claude-*` 原样发给上游。现在与后台
+  `/v1/messages` 共用同一套规则（精确映射 + 档次兜底），但**未命中的名字仍原样透传**
+  —— converter 没有模型白名单，保持历史行为不变。
 - **定时任务风控限速（账号间零间隔修补）**：全部定时任务的账号间请求间隔梳理后，
   发现 `refresh_balances`（每小时）与 `daily_checkin`（每天）遍历账号时**零间隔连发**，
   是最机器化的上游请求形态，本次统一修补：
@@ -29,6 +33,27 @@
     是否仍启用 / 仍到期（等待期间可能被停用或手动触发过）。
 
 ### 新增
+
+- **Anthropic 模型名精确映射表 `ADMIN_ANTHROPIC_MODEL_MAP`**（新增
+  `core/anthropic_model_map.py`；`admin/config.py`、`admin/routers/proxy.py`、
+  `core/converter.py`、`admin/server.py`）：
+  原先 `claude-*` 只能按 opus / sonnet / haiku 三个**档次**关键词映射，同一档次里
+  无法再分型号（新款与老款只能共用同一个目标模型）。现在可在 `.env` 里按精确名
+  逐条指定，例：
+  `ADMIN_ANTHROPIC_MODEL_MAP=claude-opus-4-6=glm-5.3,claude-sonnet-4-5=deepseek-v4.1-flash`。
+  - **判定顺序**（两侧一致）：精确映射 → 已在白名单（仅 `/v1/messages`）→
+    opus / sonnet / haiku 档次 → `/v1/messages` 落 `auto`、`/gw/v1/messages` 原样透传。
+    精确映射放在白名单**之前**：它是运维显式写的，应能覆盖「名字本来就在白名单里」的情形。
+  - 来源名大小写不敏感，且接受 `claude-opus-4-6[1m]` 这种带 1M 标记的写法
+    （标记会被忽略 —— Claude Code 本来会在客户端剥掉它，但手写配置时常被照抄）。
+  - 非法条目（缺 `=`、来源或目标为空）**不阻止启动**，只在日志里告警：
+    一个手滑的逗号不该让整个服务起不来。
+  - 目标名仍走白名单校验：写了白名单外的名字，请求以 `400 model_not_found` 失败，
+    而不是静默改道到别的模型。
+  - 两侧共用同一份配置：单端口部署时 `admin/server.py` 在挂载 `/gw` 时显式注入，
+    避免 `/gw` 与 `/v1/messages` 因 `.env` 加载时序不同而表现不一致。
+  - 测试：`tests/test_anthropic_model_map.py`（18 例：解析 / `[1m]` 规范化 / 查表 /
+    档次顺序 / 两侧优先级 / 懒加载缓存）。
 
 - **账号页支持按积分排序**（`admin/static/index.html`）：
   「总积分」与「剩余」两列表头改为可点按钮，各自在

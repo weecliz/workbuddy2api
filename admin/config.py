@@ -14,6 +14,7 @@ import logging
 from dotenv import load_dotenv
 
 from admin.db_config import db_config
+from core.anthropic_model_map import describe_invalid_entries, parse_model_map
 
 # 加载项目根目录的 .env（无论运行时 CWD 在哪都能找到）。
 # 不会覆盖已经存在的系统环境变量（便于容器 / systemd 注入）。
@@ -67,6 +68,18 @@ class Settings:
     ANTHROPIC_MODEL_OPUS = os.getenv("ADMIN_ANTHROPIC_MODEL_OPUS", "deepseek-v4-pro")
     ANTHROPIC_MODEL_SONNET = os.getenv("ADMIN_ANTHROPIC_MODEL_SONNET", "glm-5.2")
     ANTHROPIC_MODEL_HAIKU = os.getenv("ADMIN_ANTHROPIC_MODEL_HAIKU", "glm-5.3-flash")
+
+    # 精确映射表（可选）：把某个来源模型名直接钉到某个目标模型，**优先于**上面的
+    # 档次兜底，也优先于「名字已在白名单里就原样透传」。适合同一档次下还要分型号
+    # 的场景（如 claude-opus-4-6 走强模型、claude-opus-4-1 走便宜的）。
+    # 格式：来源名=目标模型名，多条用英文逗号分隔；来源名大小写不敏感。
+    # 例：ADMIN_ANTHROPIC_MODEL_MAP=claude-opus-4-6=glm-5.3,claude-sonnet-4-5=deepseek-v4.1-flash
+    # 目标名最终仍要经白名单校验：写了个白名单外的名字，请求会以 400 model_not_found 失败。
+    ANTHROPIC_MODEL_MAP, _invalid_model_map = parse_model_map(
+        os.getenv("ADMIN_ANTHROPIC_MODEL_MAP", "")
+    )
+    if _invalid_model_map:
+        _logger.warning(describe_invalid_entries(_invalid_model_map))
 
     # /v1/messages 的 harness 脱敏开关（与 converter 的 /gw 端点同款处理）。
     # Claude Code 的 system prompt / tools 是固定模板，内含 "DoS / exploit / credential"

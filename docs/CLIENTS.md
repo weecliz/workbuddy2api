@@ -42,6 +42,8 @@ codex --profile workbuddy "你的任务描述"
 
 - **`base_url` 不要带 `/v1`**：Anthropic SDK 会自己拼 `/v1/messages`，填成 `.../v1` 会变成 `/v1/v1/messages`。（对比：OpenAI 系客户端要填 `.../v1`。）
 - 模型名可以照抄 Claude 官方的 `claude-sonnet-4-5-*` 这类名字 —— 服务端会按 opus / sonnet / haiku 三档自动映射到白名单里的模型；也可以直接填 `glm-5.2` 这类真实模型名。
+- **映射优先级（高 → 低）**：① `ADMIN_ANTHROPIC_MODEL_MAP` 精确映射表 → ② 名字已在白名单 → ③ opus / sonnet / haiku 档次（`ADMIN_ANTHROPIC_MODEL_*`）→ ④ 其余落 `auto`。
+  需要「同一档次里再分型号」时用 ①：`ADMIN_ANTHROPIC_MODEL_MAP=claude-opus-4-6=glm-5.3,claude-opus-4-1=deepseek-v4.1-flash`（多条用英文逗号分隔，来源名大小写不敏感）。
 - **harness 脱敏默认开启**，无需额外参数。这一步不能省：Claude Code 的 system prompt 里有
   "DoS attacks / exploit development / credential testing" 这类**拒绝作恶的合规声明**，
   不做脱敏会被后端内容审核当成敏感内容整条拒绝，报错是极具误导性的
@@ -67,7 +69,9 @@ codex --profile workbuddy "你的任务描述"
 }
 ```
 
-- 模型名必须填腾讯后端真实模型名；不做自动映射
+- 模型名默认必须填腾讯后端真实模型名（原样透传）；若在环境变量里配了
+  `ADMIN_ANTHROPIC_MODEL_MAP` 或 `ADMIN_ANTHROPIC_MODEL_OPUS/SONNET/HAIKU`，
+  则与共享平台用**同一套映射规则**（**未命中任何规则的名字仍原样透传**，不会变成 `auto`）
 - 强烈建议开启 `--desensitize`
 
 ### 其它 OpenAI 兼容客户端（Cherry Studio / ZCode / LobeChat / NextChat / Open WebUI）

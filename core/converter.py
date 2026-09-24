@@ -609,6 +609,14 @@ from .anthropic_adapter import (
     apply_thinking_intent,
     THINKING_INTENT_KEY,
 )
+from .anthropic_model_map import (
+    ENV_MODEL_MAP,
+    describe_invalid_entries,
+    load_tiers_from_env,
+    lookup_exact,
+    match_tier,
+    parse_model_map,
+)
 
 # ---------------------------------------------------------------------------
 # 常量
@@ -1045,7 +1053,12 @@ PASSTHROUGH_BODY_KEYS = {
 
 app = FastAPI(title="codebuddy2openai", version="2.0")
 CONFIG: dict = {"api_key": "", "cred": None, "log_path": None,
-                "desensitize": False, "no_compact": False}  # cred: CredentialManager | None
+                "desensitize": False, "no_compact": False,
+                # Anthropic 模型名映射（规则见 core/anthropic_model_map.py）。
+                # None = 尚未加载：单端口部署时 admin/server.py 挂载 /gw 会注入一份
+                # 与后台 /v1/messages 同源的配置；独立运行 converter.py 时由
+                # _model_map_cfg() 从环境变量懒加载。
+                "model_map": None, "model_tiers": None}  # cred: CredentialManager | None
 
 
 # ---------------------------------------------------------------------------
@@ -1067,6 +1080,46 @@ def _log(msg: str):
                 f.write(line)
     except OSError:
         pass  # 日志失败不应影响主流程
+
+
+def _model_map_cfg() -> tuple[dict, dict]:
+    """取（精确映射, 档次目标），首次调用时加载并缓存。
+
+    单端口部署下 admin 已在挂载 /gw 时注入（见 admin/server.py），此处只读缓存；
+    独立运行 converter.py 时退回读环境变量（与后台同一组 ADMIN_ANTHROPIC_MODEL_*）。
+    """
+    if CONFIG.get("model_map") is None:
+        mapping, invalid = parse_model_map(os.environ.get(ENV_MODEL_MAP, ""))
+        if invalid:
+            _log(describe_invalid_entries(invalid))
+        CONFIG["model_map"] = mapping
+    if CONFIG.get("model_tiers") is None:
+        CONFIG["model_tiers"] = load_tiers_from_env()
+    return CONFIG["model_map"], CONFIG["model_tiers"]
+
+
+def _anthropic_model_stage(model: str) -> str:
+    """把 Anthropic 客户端发来的模型名映射成上游模型名（/gw/v1/messages 用）。
+
+    规则与后台 /v1/messages 同一套（见 core/anthropic_model_map.py），差别在第 4 步：
+      1. 空 / auto              → auto
+      2. 精确映射命中            → 映射目标
+      3. 含 opus / sonnet / haiku → 对应档次的目标模型
+      4. 其余                    → 原样透传
+
+    本端点没有模型白名单，所以未命中的名字保持原样——改动前就是直接透传给上游的。
+    """
+    name = (model or "").strip()
+    if not name or name == "auto":
+        return "auto"
+    exact, tiers = _model_map_cfg()
+    mapped = lookup_exact(name, exact)
+    if mapped:
+        return mapped
+    tier = match_tier(name, tiers)
+    if tier:
+        return tier
+    return name
 
 
 
@@ -1683,7 +1736,9 @@ async def create_message(request: Request,
     except Exception as e:
         raise HTTPException(status_code=400, detail={"error": {"message": f"request conversion error: {e}", "type": "invalid_request_error"}})
 
-    chat_body.setdefault("model", "auto")
+    # 模型名映射：口径与后台 /v1/messages 完全一致（见 core/anthropic_model_map.py）。
+    # 本端点没有模型白名单，因此未命中的名字原样透传（与改动前行为相同）。
+    chat_body["model"] = _anthropic_model_stage(chat_body.get("model") or "auto")
     chat_body["stream"] = True
     if "stream_options" not in chat_body:
         chat_body["stream_options"] = {"include_usage": True}

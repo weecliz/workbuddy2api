@@ -24,6 +24,7 @@ from admin.db import SessionLocal, get_db
 from admin.models import Account, ApiKey, ModelConfig, UsageLog
 from admin.routers.models import _is_model_allowed
 from admin.security import check_quota, get_key_row
+from core.anthropic_model_map import lookup_exact, match_tier
 
 HTTP_LIMITS = backend.HTTP_LIMITS
 
@@ -750,13 +751,14 @@ def _desensitize_chat(body: dict, enabled: bool, compact: bool = True) -> dict:
 
 
 # Claude Code 等 Anthropic 客户端发来的是 claude-* 模型名，上游不认。
-# 按 opus / sonnet / haiku 三个档次映射到本后台白名单里的模型，
-# 档次目标来自 .env（ADMIN_ANTHROPIC_MODEL_*）。
-_ANTHROPIC_MODEL_TIERS = (
-    ("opus", settings.ANTHROPIC_MODEL_OPUS),
-    ("sonnet", settings.ANTHROPIC_MODEL_SONNET),
-    ("haiku", settings.ANTHROPIC_MODEL_HAIKU),
-)
+# 规则分两层，来源见 core/anthropic_model_map.py：
+#   1. ADMIN_ANTHROPIC_MODEL_MAP 精确映射（可选，最先命中）
+#   2. 名字含 opus / sonnet / haiku 时落到 .env 的 ADMIN_ANTHROPIC_MODEL_* 档次目标
+_ANTHROPIC_MODEL_TIERS = {
+    "opus": settings.ANTHROPIC_MODEL_OPUS,
+    "sonnet": settings.ANTHROPIC_MODEL_SONNET,
+    "haiku": settings.ANTHROPIC_MODEL_HAIKU,
+}
 
 
 def _map_anthropic_model(db: Session, model: str) -> str:
@@ -764,19 +766,26 @@ def _map_anthropic_model(db: Session, model: str) -> str:
 
     按顺序判定：
       1. 空 / auto                 → auto（由号池按免费优先自选）
-      2. 已在白名单里（如 glm-5.2） → 原样，允许直接点名上游模型
-      3. 含 opus / sonnet / haiku   → 取 .env 配置的对应档次模型
-      4. 其余（claude-* 等）        → auto
+      2. 命中 ADMIN_ANTHROPIC_MODEL_MAP → 配置指定的目标模型
+      3. 已在白名单里（如 glm-5.2） → 原样，允许直接点名上游模型
+      4. 含 opus / sonnet / haiku   → 取 .env 配置的对应档次模型
+      5. 其余（claude-* 等）        → auto
+
+    第 2 条优先于第 3 条：映射表是运维显式写的，允许把某个白名单模型名改道；
+    但目标名不在这里额外校验，仍由 _pick_best_model 统一筛（写错会得到
+    400 model_not_found，而不是静默走掉）。
     """
     m = (model or "").strip()
     if not m or m == "auto":
         return "auto"
+    mapped = lookup_exact(m, settings.ANTHROPIC_MODEL_MAP)
+    if mapped:
+        return mapped
     if _pick_best_model(db, m):
         return m
-    low = m.lower()
-    for tier, target in _ANTHROPIC_MODEL_TIERS:
-        if tier in low and target:
-            return target
+    tier = match_tier(m, _ANTHROPIC_MODEL_TIERS)
+    if tier:
+        return tier
     return "auto"
 
 

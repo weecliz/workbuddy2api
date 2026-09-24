@@ -244,6 +244,16 @@ if _CONVERTER_EMBEDDED:
     # 额度向整个网络开放。所以只认环境变量，不做任何默认值兜底。
     _conv_cfg["api_key"] = os.getenv("CONVERTER_API_KEY", "")
 
+    # 模型名映射：/gw/v1/messages 与后台 /v1/messages 共用同一份 .env 配置，
+    # 在这里显式注入而不是让 converter 各自读环境变量 —— 后者会在
+    # “.env 已加载 / 未加载”两种时序下表现不一致。
+    _conv_cfg["model_map"] = settings.ANTHROPIC_MODEL_MAP
+    _conv_cfg["model_tiers"] = {
+        "opus": settings.ANTHROPIC_MODEL_OPUS,
+        "sonnet": settings.ANTHROPIC_MODEL_SONNET,
+        "haiku": settings.ANTHROPIC_MODEL_HAIKU,
+    }
+
     _log = logging.getLogger("admin.server")
     if _conv_cfg.get("cred") is None:
         _log.warning(
